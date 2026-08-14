@@ -60,7 +60,9 @@ node {baseDir}/scripts/novel-project.mjs init <项目目录> \
 node {baseDir}/scripts/novel-project.mjs status <project.json>
 ```
 
-打印五层各自的：文件是否就位、记录状态（pending/passed/failed）。加 `--verify` 连契约一起看。
+打印五层各自的：文件是否就位、记录状态（pending/passed/failed）。
+分镜表存在时，额外打印**生产进度**（每镜最小阶段状态机 storyboard/firstFrame/video/tts 的
+完成度进度条 + 阻塞列表）。加 `--verify` 连契约一起看。
 
 ### Step 2 — 跨层校验 ⛔ 出片前必跑
 
@@ -77,9 +79,28 @@ node {baseDir}/scripts/novel-project.mjs verify <project.json> [--write]
 | 集数/时长在层与层之间漂移 | 每层只跟自己比 |
 | 角色/场景/道具 id 引用悬空 | 各层 validate 只查自己那份 JSON |
 
-`--write` 把每层 verdict（passed/failed/pending）回写进 project.json 的 `skills` 字段；
-不加就只读。**有错误先修，改完重跑，直到错误归零**。警告不阻塞，但要看一眼：
-功能角色没设定卡、参考图是占位符这类，出片前要拍板。
+`--write` 把每层 verdict（passed/failed/pending）回写进 project.json 的 `skills` 字段，
+并把各层产物的 sha256 + 上游 hash + 生成 skill 版本写进 `versions`；不加就只读。
+**有错误先修，改完重跑，直到错误归零**。警告不阻塞，但要看一眼：
+功能角色没设定卡、参考图文件缺失这类，出片前要拍板。
+
+#### P0-2 失效传播（幂等）
+
+`verify` 会把各层产物的当前 hash 与记录在 `project.versions[id].inputs` 里的**上游 hash**
+比对：上游（如剧本）变了、而本层（如分镜）没重新生成，就报"上游已变更……产物可能过期"。
+`verify --write` 和 `build` 都会把当前 hash 写回 `versions`；**有上游过期的层保留旧记录**，
+直到真正重新生成——这样"该重跑"不会被 `--write` 静默吞掉。
+
+注意：**手工精修产物本身（比如逐镜润色 prompt）不算过期**——只有上游输入变了才失效。
+这就是无外部工具依赖下的幂等生产基础。
+
+#### P0-3 连续性状态机（跨镜）
+
+分镜每镜带 `continuity` 块（角色 wardrobe/emotion/state/position、道具 state、场景
+lighting/weather/time）。`verify` 比对相邻镜：**同集内**角色服装跳变、**同场同集内**
+道具状态突变（缺承接节拍）与光照突变都会告警；换场/换集的光照与服装变化是合法的，不误报。
+旧分镜无 `continuity` 块时自动跳过，向后兼容；`continuity` 块全是 seed 骨架（关键字段
+未填）时也会提醒——连续性检查只有在状态被填实后才真正生效。
 
 ### Step 3 — 下一步该干什么（build）
 
@@ -109,11 +130,11 @@ skill、需要什么上游。跑完一层重跑 build 会自动推进。五层�
 node {baseDir}/scripts/selftest.mjs
 ```
 
-15 项断言，不调模型、不花额度。每道跨层契约都有击穿用例——证明它真的会拦。
+29 项断言，不调模型、不花额度。每道跨层契约都有击穿用例——证明它真的会拦。
 
 ## 自带样例
 
 `{baseDir}/examples/渡口-project.json`：指向仓库里五份《渡口》样例产物。直接跑
 `build` 会告诉你"分镜表还没出"——按提示先跑 novel-storyboard 的 seed，再 `verify`
-就能看到全部契约（含 3 条真实存在的警告：更夫没设定卡、剧本第 6 集 S02 缺光照、
-角色参考图是占位符）。
+就能看到全部契约（含真实存在的警告：更夫没设定卡、剧本第 6 集 S02 缺光照、
+分镜表缺失等）。P0 之后新增的 `versions` / `production` 区也在本样例里展示。

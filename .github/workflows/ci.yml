@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: structure + selftests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ['18', '20', '22']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      # 零依赖、零 API key：只跑确定性结构与各 skill 自测
+      - name: 仓库级结构检查 + 全部自测
+        run: node scripts/check.mjs --run
+      # 黄金冒烟：示例 project.json 的 verify 不能崩（缺产物仅 warning，退出 0）
+      - name: 黄金冒烟 novel-project verify（渡口示例）
+        run: node skills/novel-project/scripts/novel-project.mjs verify skills/novel-project/examples/渡口-project.json
+      # 黄金冒烟：status 生产进度不崩
+      - name: 黄金冒烟 novel-project status（渡口示例）
+        run: node skills/novel-project/scripts/novel-project.mjs status skills/novel-project/examples/渡口-project.json

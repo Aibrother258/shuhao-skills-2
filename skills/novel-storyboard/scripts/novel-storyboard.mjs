@@ -209,6 +209,7 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
           // ── 首帧图 / 视频 ComfyUI 工作流专用字段 ──
           splitPrompt: '',          // 纯文本首帧提示词（可直接复制进 Krea2 文生图/图生图）
           refImagePaths: [],        // 本镜引用的人物角色图路径（来自 cast.json，供 H3 I2VA 与首帧图生图复用）
+          continuity: null,         // 连续性状态块（P0-3）：角色服装/状态、道具状态、场景光照，跨镜比对用；autofill 时注入骨架
           firstFrameCopyBlock: '',  // 可直接复制粘贴到 Krea2 ComfyUI 的首帧出图整块
           batch: nextBatch(sceneId, resolveLighting(sceneId, scene.lighting)),
           warnings: [],
@@ -220,6 +221,7 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
           shot.negativePrompt = composeNegative(shot, ctx);
           shot.splitPrompt = composeSplitPrompt(shot, ctx, params);
           shot.refImagePaths = composeRefImages(shot, ctx);
+          shot.continuity = composeContinuity(shot, ctx);
           shot.firstFrameCopyBlock = composeFirstFrameCopyBlock(shot, ctx, params);
           if (params.promptFormat !== 'legacy') {
             shot.h3 = composeH3(shot, ctx, params, epSpeakerMap);
@@ -292,16 +294,55 @@ function composeSplitPrompt(shot, ctx, params) {
 }
 
 // 本镜要用到的人物角色图路径（来自 cast.json，供首帧图生图 + H3 I2VA 复用）
-// 优先用 cast.image.path（真实文件）；缺失时退化为角色名占位，提示用户手动补图。
+// 优先用 cast.image.portrait（干净单视角参考图，专供生成）；其次 cast.image.path；
+// 两者皆缺时退化为角色名占位，提示用户手动补图。
 function composeRefImages(shot, ctx) {
   const paths = [];
   for (const cid of shot.characters) {
     const name = ctx.cidToName[cid];
     const cast = name && ctx.nameToCast[name];
-    if (cast && cast.image && cast.image.path) paths.push(cast.image.path);
+    const img = cast && cast.image;
+    // 真实参考图路径优先于占位符：novel-characters 的 portrait 应指向干净单视角图
+    if (img && img.portrait) paths.push(img.portrait);
+    else if (img && img.path) paths.push(img.path);
     else if (name) paths.push(`【角色图:${name}】`);
+    else paths.push(`【角色图:${cid}】`);
   }
   return [...new Set(paths)];
+}
+
+// 连续性状态块（P0-3）：给出每镜的"状态快照"骨架，供 novel-project 跨镜状态机比对。
+// 取值优先来自角色/道具/场景当前设定；缺失项留空字符串，由人工在 seed 后精修。
+// continuity 不代表最终生成结果，而是"这一镜应有的连续性约束"。
+function composeContinuity(shot, ctx) {
+  const characters = {};
+  for (const cid of shot.characters) {
+    const name = ctx.cidToName[cid];
+    const cast = name && ctx.nameToCast[name];
+    characters[cid] = {
+      name: name || cid,
+      wardrobe: (cast && cast.wardrobe) || '',      // 服装状态（如 W01 藏青学生装）；缺省留空待补
+      emotion: (cast && cast.emotion) || '',        // 情绪（如 angry/calm）；缺省留空
+      state: 'on_screen',                           // 在场状态：on_screen / off_screen / held
+      position: ''                                  // 画面位置（如 left/center/right）；缺省留空
+    };
+  }
+  const props = {};
+  for (const pid of shot.props) {
+    const pm = ctx.propMap[pid];
+    props[pid] = {
+      name: (pm && pm.name) || pid,
+      state: (pm && pm.states && pm.states[0] && pm.states[0].state) || ''  // 当前道具状态（如 held/on_table），art.json 的字段名是 state
+    };
+  }
+  const sm = ctx.sceneMap[shot.sceneId];
+  const lit = (sm && sm.lighting && sm.lighting.find(l => l.state === shot.lighting)) || (sm && sm.lighting && sm.lighting[0]);
+  const scene = {
+    lighting: shot.lighting || (lit && lit.state) || '',
+    weather: (sm && sm.weather) || '',
+    time: (sm && sm.time) || ''
+  };
+  return { characters, props, scene };
 }
 
 // 首帧出图整块（可直接复制粘贴到 Krea2 ComfyUI 工作流）：

@@ -5,10 +5,11 @@
 //   node scripts/check.mjs --run      结构通过后再把每个 selftest 跑一遍
 
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
-const repo = resolve(import.meta.dirname, '..');
+const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const skillsDir = join(repo, 'skills');
 const errors = [];
 const warnings = [];

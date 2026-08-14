@@ -62,7 +62,8 @@
 | `prompt` | **模型填**（autofill 可自动合成） | 首帧生成提示词，**必须英文**（图生视频 I2VA/FL2VA 的首帧或 T2V 底图） |
 | `splitPrompt` | autofill 生成 | 纯文本首帧提示词（单行），**可直接复制进 Krea2 ComfyUI 文生图/图生图节点** |
 | `negativePrompt` | **模型填**（autofill 可自动合成） | 反向提示词，**必须英文** |
-| `refImagePaths` | autofill 生成 | 本镜引用的人物角色图路径清单（来自 `cast.json` 的 `image.path`；缺省退化为 `【角色图:名】` 占位，提示用户补图），供首帧图生图与 H3 I2VA 复用 |
+| `refImagePaths` | autofill 生成 | 本镜引用的人物角色图路径清单（**优先**用 `cast.json` 的 `image.portrait`（干净单视角参考图，专供生成）；其次 `image.path`；两者皆缺退化为 `【角色图:名】` 占位，提示用户补图），供首帧图生图与 H3 I2VA 复用 |
+| `continuity` | autofill 注入骨架（P0-3） | 连续性状态块：`{ characters: {cid:{name,wardrobe,emotion,state,position}}, props:{pid:{name,state}}, scene:{lighting,weather,time} }`。给出每镜的状态快照，供 `novel-project verify` 跨镜状态机比对（服装跳变、道具状态突变、光照突变告警）。缺省留空待模型 seed 后精修 |
 | `firstFrameCopyBlock` | autofill 生成 | **首帧出图整块**：正向提示词 + 反向提示词 + 参考图，分块标注，**可直接复制粘贴到 Krea2 ComfyUI 工作流** |
 | `h3` | autofill 生成（仅 `promptFormat=h3`） | H3 视频提示词三段式（见下），`mode` 为 `I2VA`/`T2VA`；I2VA 额外带 `firstFrameReference`/`characterReference` |
 | `h3CopyBlock` | autofill 生成（仅 `promptFormat=h3`） | **视频生成整块**：首帧引用句(I2VA) + 三段式字段，分块标注，**可直接复制粘贴到 MiniMax H3 ComfyUI 工作流** |
@@ -127,5 +128,5 @@
 - 操作：`h3Mode=i2va` 时，把"首帧引用句"粘到提示词开头，把首帧图作为 `<Picture 1>` 传入，把角色图作为参考图；其余三段（`integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`）分别粘入对应字段。
 - 抽卡：对同一 `shotId` 反复换随机种子/微调提示词，直到画面与角色一致、运镜满意，再进下一镜。
 
-> `refImagePaths` 的真实路径需在 `cast.json` 的 `image.path` 填入（指向本地角色图文件）；缺省时退化为 `【角色图:名】` 占位，请手动替换为实际图路径或图节点。
+> `refImagePaths` 的真实路径优先在 `cast.json` 的 `image.portrait` 填入（干净单视角参考图，专供生成参考）；其次 `image.path`；缺省时退化为 `【角色图:名】` 占位，`novel-project verify` 会报"参考图文件缺失"提醒补图。
 

@@ -79,12 +79,15 @@ node scripts/novel-storyboard.mjs seed <script.json> \
 - 不加 `--autofill`：提示词留空，由你（模型）逐镜精写。
 
 ### Step 3 · 补"设计字段"（模型职责）
-骨架里**只有提示词和预警需要你填**：
+骨架里**只有提示词、预警和连续性状态需要你填**：
 - `prompt`：首帧画面英文描述（若未 autofill，需你写；autofill 后建议逐镜润色景别/构图/情绪）。
 - `negativePrompt`：反向提示词（autofill 已给，可改）。
 - `shotType` / `camera`：按需覆盖默认。
 - `warnings`：多人近景/特写、含人群等大模型难 render 的镜头，标注难点。
 - `note`：VO（心声）镜必须说明取景（不放说话人/只给表情）。
+- `continuity`：seed 只给骨架（角色名/在场状态/场景光照），**你要把每个有戏的角色补上
+  wardrobe / emotion / position，道具有状态弧的补 state**——novel-project 的跨镜连续性
+  检查靠它工作：服装跳变、道具状态突变、同场光照突变都会被拦。不填 = 检查不生效。
 
 ### Step 4 · 过质量门（必须全过）
 ```bash

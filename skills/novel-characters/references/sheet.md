@@ -167,3 +167,13 @@ python3 "$CODEX_HOME/skills/.system/imagegen/scripts/remove_chroma_key.py" <in.p
 ## 文件名
 
 用 `node scripts/novel-characters.mjs slug "<角色名>"` 生成安全文件名（中文会保留）。`render` 会自动去 `images/<slug>-sheet.png` 找图，找到就嵌进 report.html——所以**先出图，再 render**。
+
+## 参考图（portrait，推荐）
+
+sheet 是合成板，不能直接当 Krea2/H3 的角色一致性参考。每个选中角色额外出一张
+**纯正面半身像**（同人同服装、单视角、无分栏无文字无细节条、纯白背景），落盘
+`<输出目录>/assets/cast/<角色名>-portrait.png`，并把路径写进 cast.json 的 `image.portrait`。
+
+- 一次调用一张，绝不批量；文件已存在就跳过（断点续跑）
+- 提示词可以直接复用 sheet 提示词里「LEFT ZONE」的半身像描述，去掉分栏/细节条要求
+- 没出 portrait 不阻断：`image.portrait` 留空，`novel-project verify` 会以占位/缺失提醒

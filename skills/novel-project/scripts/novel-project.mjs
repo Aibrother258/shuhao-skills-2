@@ -6,6 +6,42 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createHash } from 'node:crypto';
+
+// 生产阶段（最小集，随适配器上线再扩展）。status 取值见 PROD_STATUS。
+export const PROD_STAGES = ['storyboard', 'firstFrame', 'video', 'tts'];
+export const PROD_STATUS = ['pending', 'ready', 'generated', 'passed', 'failed', 'blocked'];
+
+// 失效传播：每个产物的上游依赖。某上游 hash 变了，下游产物就算"过期"。
+export const UPSTREAM = {
+  'novel-outline': [],
+  'novel-characters': [],
+  'novel-art': ['novel-outline'],
+  'novel-script': ['novel-outline'],
+  'novel-storyboard': ['novel-script', 'novel-outline', 'novel-art', 'novel-characters'],
+};
+
+// 从各 skill 的 SKILL.md frontmatter 读版本，单一事实源，不硬编码。
+export function skillVersionOf(id) {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(here, '..', '..', id, 'SKILL.md'), 'utf8');
+    const m = /^version:\s*["']?([0-9][^\s"']*)/m.exec(raw);
+    return m ? m[1] : '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
+
+// 幂等：每个产物文件算 sha256，作为失效传播的基础。
+export function fileHash(abs) {
+  try {
+    const buf = readFileSync(abs);
+    return createHash('sha256').update(buf).digest('hex').slice(0, 16);
+  } catch {
+    return null;
+  }
+}
 
 export const SKILLS = [
   { id: 'novel-characters', key: 'cast',       label: '角色设定', need: '小说原文' },
@@ -49,6 +85,16 @@ export function templateProject(opts = {}) {
       'novel-art': 'pending',
       'novel-script': 'pending',
       'novel-storyboard': 'pending',
+    },
+    // ── 失效传播 / 幂等（P0-2）──
+    // versions：每层产物的文件 hash 与生成它的 skill 版本，供 build/status 判断"哪层过期、哪镜该重跑"。
+    versions: {
+      // 例： 'novel-storyboard': { hash: 'a1b2c3...', skillVersion: '1.3.0', generatedAt: '...' }
+    },
+    // ── 生产状态（P0-2，最小阶段集，随适配器上线再扩展）──
+    // production.shots[shotId] = { storyboard, firstFrame, video, tts }，每项为 PROD_STATUS 之一。
+    production: {
+      shots: {},
     },
   };
 }
@@ -368,7 +414,7 @@ export function checkStoryboard(project, b, script, art, cast, outline, issues) 
     const extra = placeholderRefs.size > 8 ? ` 等 ${placeholderRefs.size} 个角色` : '';
     issues.push({
       skill: 'novel-storyboard', level: 'warning',
-      msg: `${placeholderRefs.size} 个角色的参考图还是占位符（涉及：${names}${extra}），出图前先补 cast 里 image.path`,
+      msg: `${placeholderRefs.size} 个角色的参考图还是占位符（涉及：${names}${extra}），出图前先补 cast 里 image.portrait（干净单视角参考图，优先）或 image.path`,
     });
   }
   for (const [name, count] of missingCast) {
@@ -377,6 +423,147 @@ export function checkStoryboard(project, b, script, art, cast, outline, issues) 
       msg: `角色「${name}」在 ${count} 个镜头里出场，但没有对应的角色设定图/设定卡——功能角色可接受，主角/配角请回 novel-characters 补卡`,
     });
   }
+}
+
+// P0-1 + P0-3：跨镜连续性状态机校验。
+// · 引用图真实路径（非占位符）必须文件存在，否则首帧出图会断链（相对 project.json 所在目录解析）。
+// · 相邻镜同一角色：服装 wardrobe 跳变（穿帮）告警——只在同一集内比，跨集换装不算穿帮。
+// · 相邻镜同一道具：状态 state 突变告警（提示核对是否有承接动作节拍）——同集同场才比。
+// · 场景光照突变告警——只在同场（sceneId 相同）内比，换场/换集的光照变化是合法的。
+// 说明：P0 阶段对"状态机合法转移"只做突变告警，不强制枚举，交由人工在 seed 后精修 continuity 块。
+export function checkContinuity(project, base, b, issues) {
+  // P0-1：引用图文件存在性（仅当为真实路径、非占位符时检查）
+  const PLACEHOLDER = /【角色图:/;
+  const missingFiles = new Set();
+  for (const ep of b.episodes || []) {
+    for (const sh of ep.shots || []) {
+      for (const r of sh.refImagePaths || []) {
+        if (!r || PLACEHOLDER.test(r)) continue; // 占位符由 checkStoryboard 单独报
+        const abs = isAbsolute(r) ? r : join(base, r);
+        try {
+          readFileSync(abs);
+        } catch {
+          missingFiles.add(r);
+        }
+      }
+    }
+  }
+  if (missingFiles.size) {
+    issues.push({
+      skill: 'novel-project', level: 'warning',
+      msg: `角色参考图文件缺失，首帧出图将断链：${[...missingFiles].slice(0, 6).join('、')}${missingFiles.size > 6 ? ` 等 ${missingFiles.size} 个` : ''}`,
+    });
+  }
+  // P0-3：把所有集的 shots 拍平成按顺序排列的镜头序列，再比对相邻镜连续性状态块
+  const seq = [];
+  for (const ep of b.episodes || []) {
+    for (const sh of ep.shots || []) seq.push(sh);
+  }
+  for (let i = 1; i < seq.length; i++) {
+    const prev = seq[i - 1];
+    const cur = seq[i];
+    const pc = prev.continuity, cc = cur.continuity;
+    if (!pc || !cc) continue;
+    if (prev.ep !== cur.ep) continue; // 跨集不比：换集换装/换场都是合法的
+    // 角色服装跳变（同集内）
+    for (const cid of Object.keys(cc.characters || {})) {
+      const pch = (pc.characters || {})[cid];
+      if (!pch) continue;
+      const pw = (pch.wardrobe || '').trim();
+      const cw = (cc.characters[cid].wardrobe || '').trim();
+      if (pw && cw && pw !== cw) {
+        issues.push({
+          skill: 'novel-storyboard', level: 'warning',
+          msg: `连续性：角色 ${cid} 服装在 ${prev.shotId}→${cur.shotId} 跳变（${pw}→${cw}），无换装节拍，疑似穿帮`,
+        });
+      }
+    }
+    // 道具状态突变（同集同场）
+    if (prev.sceneId === cur.sceneId) {
+      for (const pid of Object.keys(cc.props || {})) {
+        const pp = (pc.props || {})[pid];
+        if (!pp) continue;
+        const ps = (pp.state || '').trim();
+        const cs = (cc.props[pid].state || '').trim();
+        if (ps && cs && ps !== cs) {
+          issues.push({
+            skill: 'novel-storyboard', level: 'warning',
+            msg: `连续性：道具 ${pid} 状态在 ${prev.shotId}→${cur.shotId} 突变（${ps}→${cs}），请确认两镜之间有承接动作节拍`,
+          });
+        }
+      }
+    }
+    // 场景光照突变（仅同场）
+    if (prev.sceneId === cur.sceneId) {
+      const pl = (pc.scene && pc.scene.lighting || '').trim();
+      const cl = (cc.scene && cc.scene.lighting || '').trim();
+      if (pl && cl && pl !== cl) {
+        issues.push({
+          skill: 'novel-storyboard', level: 'warning',
+          msg: `连续性：场景光照在 ${prev.shotId}→${cur.shotId} 突变（${pl}→${cl}），确认是同一场内的合理变化`,
+        });
+      }
+    }
+  }
+  // 完整性：continuity 块存在但全是骨架（wardrobe/emotion/position 未填）→ 检查实际未生效
+  let withBlock = 0;
+  let allSkeleton = 0;
+  for (const sh of seq) {
+    const c = sh.continuity;
+    if (!c) continue;
+    withBlock += 1;
+    const filled = Object.values(c.characters || {})
+      .some((v) => (v.wardrobe || '').trim() || (v.emotion || '').trim() || (v.position || '').trim());
+    if (!filled) allSkeleton += 1;
+  }
+  if (withBlock && allSkeleton === withBlock) {
+    issues.push({
+      skill: 'novel-project', level: 'warning',
+      msg: 'continuity 块全是 seed 骨架（wardrobe/emotion/position 未填），跨镜连续性检查未生效——请在 storyboard 里逐镜补状态后重跑 verify',
+    });
+  }
+}
+
+// 失效传播记录：把各产物当前 hash + 上游 hash + 生成 skill 版本写进 project.versions。
+// 有上游过期的层不覆盖记录——否则 warning 会被 --write 静默吞掉，等于把"该重跑"藏起来。
+export function recordVersions(project, loaded, staleSkills) {
+  const versions = project.versions || (project.versions = {});
+  for (const s of SKILLS) {
+    const { abs } = loaded[s.id];
+    if (!abs || !fileHash(abs)) continue;
+    if (staleSkills.has(s.id)) continue; // 上游已变，保留旧记录直到真正重新生成
+    const inputs = {};
+    for (const up of UPSTREAM[s.id]) {
+      const upAbs = loaded[up] && loaded[up].abs;
+      if (upAbs) inputs[up] = fileHash(upAbs);
+    }
+    versions[s.id] = {
+      hash: fileHash(abs),
+      skillVersion: skillVersionOf(s.id),
+      generatedAt: new Date().toISOString(),
+      inputs,
+    };
+  }
+  return versions;
+}
+
+// 找"上游已变但本层没重跑"的过期产物（失效传播的核心）。
+export function staleArtifacts(project, loaded) {
+  const stale = new Set();
+  for (const s of SKILLS) {
+    const { abs } = loaded[s.id];
+    if (!abs) continue;
+    const rec = project.versions && project.versions[s.id];
+    if (!rec || !rec.inputs) continue;
+    for (const up of UPSTREAM[s.id]) {
+      const upAbs = loaded[up] && loaded[up].abs;
+      if (!upAbs) continue;
+      const recorded = rec.inputs[up];
+      const cur = fileHash(upAbs);
+      if (recorded && cur && recorded !== cur) stale.add(s.id);
+    }
+  }
+  return stale;
 }
 
 /* ------------------------------------------------------------------ */
@@ -404,6 +591,35 @@ export function verifyProject(projectPath) {
   if (art.data) checkArt(project, art.data, outline.data, issues);
   if (script.data) checkScript(project, script.data, outline.data, art.data, issues);
   if (storyboard.data) checkStoryboard(project, storyboard.data, script.data, art.data, cast.data, outline.data, issues);
+  if (storyboard.data) checkContinuity(project, base, storyboard.data, issues);
+  // P0-2 失效传播：上游 hash 变了但本层没重跑 → 过期
+  for (const id of staleArtifacts(project, loaded)) {
+    const s = SKILLS.find((x) => x.id === id);
+    const rec = project.versions && project.versions[id];
+    const ups = UPSTREAM[id].filter((u) => {
+      const upAbs = loaded[u] && loaded[u].abs;
+      return upAbs && rec && rec.inputs && rec.inputs[u] && rec.inputs[u] !== fileHash(upAbs);
+    });
+    issues.push({
+      skill: id, level: 'warning',
+      msg: `上游已变更（${ups.map((u) => u).join('、')}），${s.label} 产物可能过期——请重新生成后重跑 verify`,
+    });
+  }
+  // P0-2 生产状态初始化：storyboard 存在时，为每个 shot 建最小阶段状态（缺省 pending）
+  if (storyboard.data && Array.isArray(storyboard.data.episodes)) {
+    if (!project.production) project.production = { shots: {} };
+    if (!project.production.shots) project.production.shots = {};
+    const sbErrs = issues.filter((i) => i.skill === 'novel-storyboard' && i.level === 'error');
+    for (const ep of storyboard.data.episodes) {
+      for (const sh of ep.shots || []) {
+        if (!project.production.shots[sh.shotId]) {
+          const st = {};
+          for (const stage of PROD_STAGES) st[stage] = stage === 'storyboard' ? (sbErrs.length ? 'failed' : 'passed') : 'pending';
+          project.production.shots[sh.shotId] = st;
+        }
+      }
+    }
+  }
   return { base, project, issues, loaded };
 }
 
@@ -494,6 +710,32 @@ function cmdStatus(projectPath, opts) {
     const mark = exists ? '✓' : '—';
     console.log(`  ${mark} ${s.label}（${s.id}） 文件${exists ? '已就位' : '缺失'} · 记录状态 ${recorded}`);
   }
+  // ── P0-2 生产进度（每镜最小阶段状态机）──
+  const shots = (project.production && project.production.shots) || {};
+  const shotIds = Object.keys(shots);
+  if (shotIds.length) {
+    console.log('\n生产进度（每镜最小阶段）：');
+    for (const stage of PROD_STAGES) {
+      let done = 0;
+      for (const id of shotIds) {
+        const st = shots[id][stage];
+        if (st === 'passed' || st === 'generated' || st === 'ready') done++;
+      }
+      const pct = Math.round((done / shotIds.length) * 100);
+      const bar = '█'.repeat(Math.round(pct / 10)) + '░'.repeat(10 - Math.round(pct / 10));
+      console.log(`  ${stage.padEnd(12)} ${bar} ${pct}%  (${done}/${shotIds.length})`);
+    }
+    const blocked = [];
+    for (const id of shotIds) {
+      for (const stage of PROD_STAGES) {
+        const st = shots[id][stage];
+        if (st === 'failed' || st === 'blocked') blocked.push(`${id}:${stage}=${st}`);
+      }
+    }
+    if (blocked.length) {
+      console.log(`\n阻塞（需人工处理）：\n  ${blocked.slice(0, 12).join('\n  ')}${blocked.length > 12 ? `\n  …共 ${blocked.length} 项` : ''}`);
+    }
+  }
   if (opts.verify) {
     const v = verifyProject(projectPath);
     console.log('\n契约：');
@@ -506,6 +748,7 @@ function cmdVerify(projectPath, opts) {
   printVerify(v.issues);
   const { errs } = summary(v.issues);
   if (opts.write) {
+    const stale = staleArtifacts(v.project, v.loaded);
     const next = {};
     for (const s of SKILLS) {
       const rel = v.project.paths && v.project.paths[s.key];
@@ -515,8 +758,12 @@ function cmdVerify(projectPath, opts) {
       next[s.id] = !exists ? 'pending' : skillErrs.length ? 'failed' : 'passed';
     }
     v.project.skills = next;
+    recordVersions(v.project, v.loaded, stale);
+    if (stale.size) {
+      console.log(`⚠ 以下层上游已变更，versions 记录保留旧值，等重新生成后再 --write：${[...stale].join('、')}`);
+    }
     writeFileSync(resolve(projectPath), JSON.stringify(v.project, null, 2) + '\n');
-    console.log(`✓ 已把状态回写到 ${projectPath}`);
+    console.log(`✓ 已把状态与 versions 回写到 ${projectPath}`);
   }
   process.exit(errs.length ? 1 : 0);
 }
@@ -541,6 +788,14 @@ function cmdBuild(projectPath, opts) {
   if (errs.length) {
     console.log('\n资产齐了但契约有错——先修再出片，别带病往下游走。');
     process.exit(1);
+  }
+  const stale = staleArtifacts(v.project, v.loaded);
+  recordVersions(v.project, v.loaded, stale);
+  writeFileSync(resolve(projectPath), JSON.stringify(v.project, null, 2) + '\n');
+  if (stale.size) {
+    console.log(`⚠ 以下层上游已变更，versions 保留旧记录：${[...stale].join('、')}——先重新生成再 build`);
+  } else {
+    console.log('✓ 已把 versions（上游 hash + 生成 skill 版本）写回 project.json');
   }
   console.log('\n✅ 全部就绪：角色 → 大纲 → 美术 → 剧本 → 分镜 契约一致，可以往下游出图/出视频了。');
 }

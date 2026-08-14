@@ -1,5 +1,50 @@
 # Changelog
 
+## novel-project — 复查修复（2026-08-14b 补）
+
+对 2026-08-14b 的 P0 迭代做代码级复查，修掉四个真 bug（自测 21 → 29 项，全仓库 819 项）：
+
+- **portrait 样例脏数据**：`渡口-cast.json` 里三个角色的参考图文件名被写错
+  （陆行远→林晚、老周→顾沉舟、胡二爷→苏曼），已改回；并在 novel-characters
+  的 Step 8 / sheet.md 补上 portrait 出图流程——之前字段只有消费端（storyboard
+  引用）没有生产端（没有一步告诉 agent 怎么生成这张干净单视角图）
+- **参考图文件存在性检查是死代码**：`checkContinuity` 读 `project.paths['novel-characters']`
+  （键名实际是 `cast`），base 永远为 null，检查从不执行。已改用 `paths.cast` +
+  project.json 所在目录，路径解析规则明确（相对项目根），并补击穿测试
+- **失效传播空转**：`verify --write` 和 `build` 之前都不写 `versions`，hash 比对永远不触发；
+  且检测方向反了（"本文件变了"而非"上游变了"）。现在 `--write`/`build` 记录
+  各层 hash + **上游 hash** + 生成 skill 版本；只有上游输入变了才报"产物可能过期"，
+  过期的层保留旧记录直到真正重新生成（防止 --write 吞掉警告）
+- **连续性检查假警报 + 空转**：光照比较不区分场景/集边界（每次换场都误报）、
+  道具状态读错字段（`states[0].name`，实际是 `.state`，永远为空）。已改为
+  同集比服装、同场同集比道具与光照；道具状态字段修正；`continuity` 全是 seed
+  骨架时明确提醒"检查未生效"，不再假装在查
+
+另修：`check.mjs` 用 `import.meta.dirname`（Node 18 不支持）导致 CI 必挂，已换
+`fileURLToPath`；skill 版本不再硬编码（novel-characters 之前被写成 1.0.0，实际
+1.7.0），改为运行时读各 SKILL.md frontmatter；README.en 同步。
+
+## novel-project — 生产闭环升级（P0，2026-08-14b）
+
+从「内容 DAG 总控」迈向「生产 DAG 总控」。零 API key、零 npm 依赖、核心逻辑确定性的红线不变。
+本轮回应在 ChatGPT / DeepSeek 对上一版（1912d28）的架构建议，收敛为四件纯确定性工作：
+
+- **P0-1 资产引用修正**：`cast.json` 的 `image` 新增 `portrait` 字段（干净单视角参考图，专供生成参考），
+  与 `sheet` 合成设定板分离；`novel-storyboard` 的 `refImagePaths` 优先取 `portrait`，缺失时退化为
+  `【角色图:名】` 占位；`novel-project verify` 核查真实路径文件是否存在（缺图则告警，不再静默占位）
+- **P0-2 幂等 + 失效传播**：`project.json` 新增 `versions`（各层产物文件 sha256 + 生成 skill 版本）与
+  `production`（每镜最小阶段状态机 `storyboard/firstFrame/video/tts`）；`verify` 比对产物 hash 与
+  记录值，变更则报"过期"；`status` 打印生产进度条 + 阻塞列表。不新建 manifest.json（并入 project.json）
+- **P0-3 连续性状态机**：分镜每镜新增 `continuity` 块（角色 wardrobe/emotion/state/position、道具 state、
+  场景 lighting/weather/time）；`novel-project verify` 把全部镜头拍平按序比对相邻镜，服装跳变 / 道具状态
+  突变（缺承接节拍）/ 光照突变均告警。旧分镜无 `continuity` 块自动跳过，向后兼容
+- **P0-4 CI + 黄金回归**：新增 `.github/workflows/ci.yml`（node 18/20/22 矩阵），跑 `scripts/check.mjs --run`
+  聚合自测 + 渡口示例 `verify`/`status` 冒烟。保持零依赖，LLM-judge 类 rubric eval 留待 P2
+
+novel-project 自测 15 → 21 项（新增失效传播、生产状态初始化、连续性跳变/突变/向后兼容用例）。
+全仓库自测总数由 805 增至 811，全部绿色。
+
+
 ## novel-project 1.0.0 — 2026-08-14
 
 **项目总控：五层产物串成一条可追踪的产线**

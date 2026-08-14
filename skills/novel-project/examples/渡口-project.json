@@ -14,10 +14,14 @@
     "storyboard": "../../novel-storyboard/examples/渡口-storyboard.json"
   },
   "skills": {
-    "novel-characters": "pending",
-    "novel-outline": "pending",
-    "novel-art": "pending",
-    "novel-script": "pending",
+    "novel-characters": "passed",
+    "novel-outline": "passed",
+    "novel-art": "passed",
+    "novel-script": "passed",
     "novel-storyboard": "pending"
+  },
+  "versions": {},
+  "production": {
+    "shots": {}
   }
 }

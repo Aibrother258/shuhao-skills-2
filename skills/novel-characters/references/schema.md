@@ -85,6 +85,7 @@
 | `image.negativePrompt` | string | **英文** | 逗号分隔 |
 | `image.tags` | string[] | **英文** | 4–8 个风格标签 |
 | `image.sheet` | string | **英文** | **角色设定图**，16:9 三区版面：左约 34% 半身像（面部基准）／右上全身三视图／右下细节条，细线分隔；**禁止出现人名**；**必须写明族裔／年代／地域** |
+| `image.portrait` | string | — | **干净单视角参考图路径**（P0-1 新增）。指向一张半身/单视角角色图文件（如 `assets/cast/沈知微-portrait.png`），专供首帧出图与 H3 I2VA 复用。**不要直接拿 `sheet` 合成板当参考图**——多视图混排会污染角色一致性。`novel-storyboard` 的 `refImagePaths` 优先取此项；缺失时退化为 `【角色图:名】` 占位，`novel-project verify` 会报"参考图文件缺失"提醒补图 |
 | `voice.timbre/pitch/pace/accent/emotion/referenceHint` | string | **本地语言** | 最容易写漂的地方，注意 |
 | `voice.prompt` | string | **英文** | 给 TTS 音色设计引擎 |
 | `voice.promptLocal` | string | 本地语言 | 上面那条的译文；`lang=en` 时省略 |

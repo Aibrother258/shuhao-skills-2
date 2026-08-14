@@ -197,6 +197,16 @@ node {baseDir}/scripts/novel-characters.mjs validate <cast.json> <book.txt>
 
 **不按 `importance` 筛，选中的角色全都出。** 一个角色一次调用，30 个就是 30 次——这是整条管线里最慢的一步，开始前跟用户说一声要出多少张。用户想省就让他给个数，或者明说只要 `protagonist` / `major`。
 
+**另外每个角色出一张干净单视角参考图（推荐，供下游首帧/H3 复用）**：sheet 是"半身像+三视图+细节条"的合成板，直接拿它当 Krea2/H3 的角色一致性参考会把多视角和细节条一起喂进生成，污染角色一致性。所以 sheet 之外，每个选中角色再出一张**纯正面半身像参考图**：
+
+- 内容：和 sheet 左栏同一个人、同一套服装，但**只一个视角、无分栏、无文字、无细节条**
+- 背景：纯白（道具类角色图可后续抠图）
+- 落盘：`<输出目录>/assets/cast/<角色名>-portrait.png`
+- 回填：把路径写进 cast.json 对应角色的 `image.portrait`（schema 见 `references/schema.md`）
+- 断点续跑：文件已存在就跳过；一次调用一张，绝不批量
+
+用户只要提示词不想出图，`image.portrait` 留空即可——`novel-project verify` 会以"参考图占位/缺失"提醒，出片前补上就行。
+
 ### Step 9 — 输出
 
 ```bash
@@ -220,6 +230,8 @@ report.html 的样式约定见 `{baseDir}/references/report-style.md`——要�
 ├── report.html                    ← 双击就能开
 └── images/
     └── <slug>-sheet.png           ← 有 codex 才有
+└── assets/cast/
+    └── <角色名>-portrait.png      ← 干净单视角参考图，推荐（有 codex 才有）
 ```
 
 ### Step 10 — 汇报

@@ -256,6 +256,23 @@ console.log('[8] export 产出 prompts/ 平铺文件');
   const sb = JSON.parse(readFileSync(join(tmp, 'sheet-board.json'), 'utf8'));
   const anySheet = sb.episodes.some(e => e.shots.some(s => (s.refImagePaths || []).some(p => p.includes('model sheet'))));
   ok('sheet 文本不进 refImagePaths（降级为占位符）', !anySheet);
+
+  // Iteration 5：direction 块注入 + export FINAL/meta
+  const board = JSON.parse(readFileSync(join(tmp, '渡口-storyboard.json'), 'utf8'));
+  const dirShot = board.episodes[0].shots.find(s => s.direction);
+  ok('autofill 后 shot.direction 已注入骨架', !!dirShot && dirShot.direction && dirShot.direction.framing && dirShot.direction.visualFocus, JSON.stringify(dirShot && dirShot.direction));
+  ok('direction.lens 特写用 85mm / 其他 35mm', board.episodes[0].shots.every(s => !s.direction || (s.shotType.includes('特写') ? s.direction.lens === '85mm' : s.direction.lens === '35mm')), JSON.stringify(board.episodes[0].shots.map(s => s.shotType + ':' + (s.direction && s.direction.lens))));
+  // first-frame.txt 带 FINAL 标签；meta.txt 含生成说明
+  ok('first-frame.txt 含 FINAL 标签', ff.includes('FINAL FIRST FRAME PROMPT'));
+  ok('导出 shots/<id>/meta.txt 存在', existsSync(join(tmp, 'prompts', 'shots', firstShot, 'meta.txt')));
+  const meta = readFileSync(join(tmp, 'prompts', 'shots', firstShot, 'meta.txt'), 'utf8');
+  ok('meta.txt 含建议时长 + 视频模式 + 导演概要', meta.includes('建议时长') && meta.includes('视频模式') && meta.includes('导演'), meta.slice(0, 200));
+  // 向后兼容：无 direction 的旧 storyboard 仍可 seed（手动构造无 direction 字段的 shot）
+  const legacyBoard = JSON.parse(JSON.stringify(board));
+  legacyBoard.episodes[0].shots[0].direction = undefined;
+  const lb = join(tmp, 'legacy-board.json'); writeFileSync(lb, JSON.stringify(legacyBoard, null, 2));
+  const lf = run(['export', lb, '--cast', join(EX, '渡口-cast.json'), '--art', join(EX, '渡口-art.json'), '--out', join(tmp, 'prompts-legacy')], tmp);
+  ok('无 direction 旧 storyboard 仍可 export（向后兼容）', lf.code === 0, lf.out.slice(-150));
 }
 
 // ── 9. split 保住 sourceBeat + G1 覆盖门仍过 ──

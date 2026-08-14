@@ -49,6 +49,23 @@ const SHOT_TYPES = ['全景', '远景', '中景', '近景', '特写', '过肩', 
 const SHOT_TYPES_EN = { '全景': 'wide shot', '远景': 'establishing shot', '中景': 'medium shot', '近景': 'close-up', '特写': 'extreme close-up', '过肩': 'over-the-shoulder shot', '主观': 'POV shot', '空镜': 'empty establishing shot' };
 const CROWD_KEYWORDS = ['人群', '多人', 'crowd', 'crowds', 'a crowd', 'many people'];
 
+// 情绪词表（用于 direction.emotion 确定性推断）：动作文本含关键词 → 对应情绪标签
+const EMOTION_MAP = [
+  ['震惊', 'shocked'], ['惊愕', 'startled'], ['惊讶', 'surprised'], ['怒', 'angry'],
+  ['悲', 'sad'], ['喜', 'happy'], ['慌', 'panicked'], ['愣', 'frozen'], ['怔', 'stunned'],
+  ['变色', 'alarmed'], ['骤变', 'alarmed'], ['平静', 'calm'], ['沉思', 'pensive'],
+  ['微笑', 'gentle smile'], ['冷笑', 'cold smirk'], ['恐惧', 'fearful'], ['犹豫', 'hesitant']
+];
+
+// 姿态词表（用于 direction.pose 确定性推断）：动作文本含关键词 → 对应姿态
+const POSE_MAP = [
+  ['转身', 'turning away'], ['走向', 'walking forward'], ['走', 'walking'],
+  ['站起', 'standing up'], ['坐下', 'seated'], ['蹲', 'crouching'],
+  ['拿起', 'reaching for'], ['看向', 'gazing toward'], ['回头', 'turning head'],
+  ['伸手', 'extending hand'], ['倚', 'leaning'], ['俯身', 'bending forward'],
+  ['迈步', 'taking a step'], ['离开', 'walking away']
+];
+
 // H3 运镜词表：把中文机位映射到 H3 的 camera motion 描述
 const CAMERA_H3 = {
   '固定机位': 'The camera holds a static shot.',
@@ -211,6 +228,7 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
           splitPrompt: '',          // 纯文本首帧提示词（可直接复制进 Krea2 文生图/图生图）
           refImagePaths: [],        // 本镜引用的人物角色图路径（来自 cast.json，供 H3 I2VA 与首帧图生图复用）
           continuity: null,         // 连续性状态块（P0-3）：角色服装/状态、道具状态、场景光照，跨镜比对用；autofill 时注入骨架
+          direction: null,          // 视觉导演块（Iteration 5）：构图/主体/前中后景/镜头/焦点/情绪/色调；autofill 时注入确定性骨架
           firstFrameCopyBlock: '',  // 可直接复制粘贴到 Krea2 ComfyUI 的首帧出图整块
           batch: nextBatch(sceneId, resolveLighting(sceneId, scene.lighting)),
           warnings: [],
@@ -295,6 +313,7 @@ function scoreComplexity({ kind, sceneChars, beat, shotType, camera, props }) {
 
 // seed 与 split 共用的 autofill：把结构化字段拼成可直接复制的提示词块。
 function autofillShot(shot, ctx, params, epSpeakerMap) {
+  shot.direction = composeDirection(shot, ctx);  // 视觉导演骨架（Iteration 5）
   shot.prompt = composePrompt(shot, ctx, params);
   shot.negativePrompt = composeNegative(shot, ctx);
   shot.splitPrompt = composeSplitPrompt(shot, ctx, params);
@@ -410,6 +429,22 @@ function composePrompt(shot, ctx, params) {
 
   const en = SHOT_TYPES_EN[shot.shotType] || 'shot';
   parts.push(`${en}, cinematic composition, ${params.style} style, Republican-era China, coherent lighting`);
+
+  // 视觉导演块（Iteration 5）：direction 存在时追加构图/镜头/焦点句，让首帧从"拼接"升级为"导演"。
+  // 没有 direction（旧 storyboard.json 或手动 seed 未 autofill）时保持现状，向后兼容。
+  const d = shot.direction;
+  if (d) {
+    const dirParts = [];
+    if (d.composition) dirParts.push(`${d.composition} composition`);
+    if (d.cameraAngle) dirParts.push(`${d.cameraAngle} camera angle`);
+    if (d.lens) dirParts.push(`${d.lens} lens`);
+    // visualFocus 可能是中文角色名（seed 时只有中文名）；英文 prompt 不得含中文，故中文时改写为 the main subject
+    const focus = (d.visualFocus && !hasCJK(d.visualFocus)) ? d.visualFocus : 'the main subject';
+    if (d.visualFocus) dirParts.push(`visual focus on ${focus}`);
+    if (d.emotion && d.emotion !== 'neutral') dirParts.push(`${d.emotion} expression`);
+    if (d.colorMood) dirParts.push(`${d.colorMood}`);
+    if (dirParts.length) parts.push(dirParts.join(', '));
+  }
   return parts.join('. ') + '.';
 }
 
@@ -486,6 +521,62 @@ function composeContinuity(shot, ctx) {
     time: (sm && sm.time) || ''
   };
   return { characters, props, scene };
+}
+
+// 视觉导演块（Visual Direction，Iteration 5）：给每镜一个确定性导演骨架，
+// 让"首帧 Prompt"从"拼接器"升级为"导演"——明确构图/主体/前中后景/镜头/焦点/情绪/色调。
+// 设计原则（守红线）：seed 用确定性逻辑填骨架，模型可选精修；composePrompt 在 direction 存在时
+// 追加构图/镜头/焦点句，没有时保持现状（向后兼容旧 storyboard.json）。
+function composeDirection(shot, ctx) {
+  const sm = ctx.sceneMap[shot.sceneId];
+  const lit = (sm && sm.lighting && sm.lighting.length)
+    ? (sm.lighting.find(l => l.state === shot.lighting) || sm.lighting[0]) : null;
+  const litPrompt = (lit && lit.prompt) || '';
+  const lp = litPrompt.toLowerCase();
+
+  // framing ← shotType（中文景别映射到英文取景）
+  const framing = SHOT_TYPES_EN[shot.shotType] || 'shot';
+
+  // 情绪 ← 动作文本情绪词表
+  const actionText = (shot.action || shot.line || '');
+  let emotion = 'neutral';
+  for (const [kw, e] of EMOTION_MAP) if (actionText.includes(kw)) { emotion = e; break; }
+
+  // 姿态 ← 动作空间/姿态词表
+  let pose = 'standing';
+  for (const [kw, p] of POSE_MAP) if (actionText.includes(kw)) { pose = p; break; }
+
+  // 视觉焦点 ← 动作主语（动作文本第一个角色名）或首个在场角色
+  let visualFocus = shot.characters[0] ? (ctx.cidToName[shot.characters[0]] || shot.characters[0]) : '';
+  for (const cid of shot.characters) {
+    const name = ctx.cidToName[cid];
+    if (name && actionText.includes(name)) { visualFocus = name; break; }
+  }
+
+  // 主体优先级 ← 在场角色顺序（动作镜按动作文本主语前置）
+  const subjectPriority = shot.characters.map(c => ctx.cidToName[c] || c);
+
+  // 色调 ← 光照/天气
+  let colorMood = 'natural muted tones';
+  if (lp.includes('rain')) colorMood = 'cool desaturated, rain-wet surfaces';
+  else if (lp.includes('night') || lp.includes('昏') || lp.includes('暮')) colorMood = 'low-key, warm artificial light';
+  else if (lp.includes('morning') || lp.includes('晨') || lp.includes('雾') || lp.includes('mist')) colorMood = 'soft diffused, pale cool light';
+  else if (lp.includes('fire') || lp.includes('暖') || lp.includes('灯')) colorMood = 'warm amber tones';
+
+  return {
+    framing,
+    cameraAngle: 'eye-level',
+    lens: shot.shotType.includes('特写') ? '85mm' : '35mm',
+    subjectPriority,
+    composition: 'rule-of-thirds',
+    foreground: '',      // 需模型按构图精修；留空待补
+    midground: shot.characters.length ? subjectPriority.join(' and ') : '',
+    background: sm ? (sm.name || '') : '',
+    visualFocus: visualFocus || (subjectPriority[0] || ''),
+    pose,
+    emotion,
+    colorMood
+  };
 }
 
 // 首帧出图整块（可直接复制粘贴到 Krea2 ComfyUI 工作流）：
@@ -1229,12 +1320,24 @@ function cmdExport(args) {
       const sd = join(dirs.shots, s.shotId);
       mkdirSync(sd, { recursive: true });
       const refLines = (s.refImagePaths && s.refImagePaths.length) ? s.refImagePaths.join('\n') : '（无）';
-      writeFileSync(join(sd, 'first-frame.txt'), `${s.firstFrameCopyBlock || s.splitPrompt || '（未 autofill，无首帧提示词）'}\n`);
+      const h3Mode = (s.h3 && s.h3.mode) || 'I2VA';
+      const dur = (s.durationSec != null) ? `${s.durationSec}s` : '（未定）';
+      // 每镜 FINAL 生成说明（参考图 / 建议时长 / 模式 / 导演概要），让 export 包"复制即用"
+      const metaLines = [
+        `=== ${s.shotId} 生成说明 (FINAL) ===`,
+        `景别: ${s.shotType || '（未定）'}`,
+        `建议时长: ${dur}`,
+        `视频模式: ${h3Mode}${h3Mode === 'I2VA' ? '（首帧图 + 角色参考图驱动）' : '（纯文本生视频）'}`,
+        `参考图: ${refLines}`,
+        s.direction ? `导演: ${s.direction.framing}, ${s.direction.cameraAngle}, ${s.direction.lens}, 焦点=${s.direction.visualFocus}, 情绪=${s.direction.emotion}, 色调=${s.direction.colorMood}` : '（无 direction，未 autofill）'
+      ].join('\n');
+      writeFileSync(join(sd, 'first-frame.txt'), `=== FINAL FIRST FRAME PROMPT（直接复制给 Krea2 文生图/图生图）===\n${s.firstFrameCopyBlock || s.splitPrompt || '（未 autofill，无首帧提示词）'}\n`);
       writeFileSync(join(sd, 'negative.txt'), `${s.negativePrompt || '（无）'}\n`);
       // h3.txt 直接写完整 h3CopyBlock（含首帧引用句 "For the target video... <Picture 1> is fully referenced"），
       // 这是 I2VA 模式赖以定位首帧的关键信息；formatH3 仅 legacy 模式（无 h3CopyBlock）兜底。
       writeFileSync(join(sd, 'h3.txt'), (s.h3CopyBlock || (s.h3 ? formatH3(s.h3) : '（legacy 模式无 H3 提示词）')) + '\n');
       writeFileSync(join(sd, 'refs.txt'), `=== 本镜参考图 Reference（建议按景别取用）===\n${refLines}\n`);
+      writeFileSync(join(sd, 'meta.txt'), metaLines + '\n');
       shotN += 1;
     }
   }

@@ -1,5 +1,14 @@
 # Changelog
 
+## novel-storyboard — Visual Director 层 + Prompt Finalization（2026-08-14e，Iteration 5）
+
+ChatGPT 第四次 / DeepSeek 复查把仓库定位收敛为 Prompt Pipeline，指出"分镜工程 > Prompt 导演"。按裁剪范围落地（守红线：零依赖、确定性、不新建架构）：
+
+- **`shot.direction` 视觉导演块**：seed 用确定性逻辑填骨架（framing←shotType、cameraAngle 默认 eye-level、lens 特写 85mm/其他 35mm、subjectPriority←角色顺序、visualFocus←动作主语、emotion/pose/colorMood←词表）；`foreground/midground/background` 可空待精修
+- **`composePrompt` 注入导演句**：direction 存在时追加构图/镜头/焦点/情绪/色调句（从"拼接器"升级为"导演"）；无 direction 时行为不变（向后兼容）
+- **export FINAL / meta**：`first-frame.txt` 加 `FINAL FIRST FRAME PROMPT` 标签；新增 `meta.txt`（景别/建议时长/视频模式/参考图/导演概要）；复制即用更明确
+- 自测 42 → **48**；全仓库 check 绿；lint 0
+
 ## 文档清理 + 定位校准（2026-08-14d，ChatGPT 第四次分析）
 
 ChatGPT 第四次把仓库定位收敛为 **Prompt Pipeline**（非生产 OS）。本轮修掉其点名的历史信息残留类 P0 文档 bug，并校准定位措辞，未动代码逻辑（守红线）：

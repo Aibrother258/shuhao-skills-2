@@ -72,7 +72,7 @@ node scripts/novel-storyboard.mjs seed <script.json> \
 - 自动填：镜号、场景、光照、在场角色、道具、景别（按人数/类型推断）、机位（默认"固定机位"）、时长（继承剧本模型）、生成批次（同场景+光照归一批）。
   光照优先级：**剧本该场指定的光照 > 美术场景第一个状态 > 默认**——剧本改光照，分镜跟着走；
   剧本没写，才回退美术的默认状态。
-- `--autofill`：把场景光照 + 角色形象 + 道具状态 + 景别 + 风格拼成英文首帧提示词；同时为每条镜头合成 **H3 三段式视频提示词**（`integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`），直接可喂给 MiniMax H3。
+- `--autofill`：把场景光照 + 角色形象 + 道具状态 + 景别 + 风格拼成英文首帧提示词；同时为每条镜头合成 **H3 三段式视频提示词**（`integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`），直接可喂给 MiniMax H3。每条镜头还会注入**视觉导演块 `direction`**（framing/cameraAngle/lens/subjectPriority/visualFocus/emotion/colorMood 等确定性骨架），首帧提示词据此追加构图/镜头/焦点句，从"拼接器"升级为"导演"。`foreground/midground/background` 可空待你精修。
 - `--prompt-format h3|legacy`（默认 `h3`）：`h3` 生成 H3 视频提示词；`legacy` 只生成首帧图像提示词（不含 `h3` 字段，质量门退化为 13+G17 道）。
 - `--h3-mode i2va|t2va`（默认 `i2va`）：`i2va`=首帧图+角色参考图驱动（图生视频，可反复抽卡，适合你的 ComfyUI 工作流）；`t2va`=纯文生视频。
 - 每条镜头额外生成两个**可直接复制粘贴**的整块：`firstFrameCopyBlock`（首帧出图，粘进 Krea2）与 `h3CopyBlock`（视频生成，粘进 H3），并列出 `refImagePaths`（人物角色图路径，供两链路复用）。
@@ -141,7 +141,7 @@ node scripts/selftest.mjs
 | `checkup <storyboard.json> [...]` | 纯文本质量门明细 |
 | `render <storyboard.json> [--md\|--html] [--out 路径]` | 渲染报告（含每条镜头可复制提示词块） |
 | `batches <storyboard.json>` | 列出生成批次单 |
-| `export <storyboard.json> [--cast --art] [--out 路径]` | 最后一公里：把分散在 JSON 里的提示词平铺导出为 `prompts/` 目录（characters/scenes/props/shots 四类 txt），打开即复制 |
+| `export <storyboard.json> [--cast --art] [--out 路径]` | 最后一公里：把分散在 JSON 里的提示词平铺导出为 `prompts/` 目录（characters/scenes/props/shots 四类 txt）。每条 shot 导出 `first-frame.txt`（带 `FINAL FIRST FRAME PROMPT` 标签）、`negative.txt`、`h3.txt`、`refs.txt` 与 `meta.txt`（生成说明：参考图 / 建议时长 / I2VA 模式 / 导演概要），打开即复制 |
 | `split <storyboard.json> [--shot E01S001 \| --auto] [--autofill] [--out 路径]` | 把复杂动作镜（标记为 `recommendSplit=true`，即动作镜 + ≥2 句号分句）按分句拆成多条子镜，时长按比例分配，保留 `sourceBeat`（G1 覆盖门仍过）。逗号串成的连续动作不自动拆，由 `warnings` 提示人工处理 |
 
 ### 端到端 ComfyUI 工作流

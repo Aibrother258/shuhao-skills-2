@@ -242,9 +242,9 @@ function sumShotSeconds(shots) { return shots.reduce((a, s) => a + (s.durationSe
 
 // 镜头复杂度评分（确定性，不依赖模型）：用于判断"1 beat 是否该拆成多镜"。
 // 评分项：人数(互动) / 动作数 / 道具交互 / 情绪变化 / 镜头运动 / 空间变化。
-// 镜头复杂度评分（确定性，不依赖模型）。
-// 评分器与拆镜器共用同一把尺子：recommendSplit 只在「动作镜 + ≥2 个句号分句」时置 true，
-// 保证"推荐可拆"必然"拆得动"（拆镜器同样只拆动作镜、只按句号分句）。
+// 评分器与拆镜器共用同一把尺子：recommendSplit 只在「动作镜 + ≥2 个句号分句 + score≥6」时置 true，
+// 保证"推荐可拆"必然"拆得动"（拆镜器同样只拆动作镜、只按句号分句），同时过滤掉简单建立镜
+// （如"浓雾把栈桥吃得只剩三步远。梆子声从岸上飘过来…"单角色无动作的 2 分句镜，score 低，不推荐拆）。
 // 逗号串成的连续动作（如"拿起手机，看了一眼消息，脸色骤变"）不再计入可拆分句，
 // 改为通过 warnings 提示人工处理，避免"提示了却拆不动"。
 function scoreComplexity({ kind, sceneChars, beat, shotType, camera, props }) {
@@ -279,8 +279,9 @@ function scoreComplexity({ kind, sceneChars, beat, shotType, camera, props }) {
   if (score >= 7) level = 'high';
   else if (score >= 4) level = 'normal';
 
-  // recommendSplit 与拆镜器对齐：仅动作镜 + ≥2 句号分句才推荐拆镜
-  const recommendSplit = kind === 'action' && splitClauses.length >= 2;
+  // recommendSplit 与拆镜器对齐（能拆才推荐），同时保留复杂度语义（过滤简单建立镜）：
+  // 仅「动作镜 + ≥2 个句号分句 + score≥6」才推荐拆镜
+  const recommendSplit = kind === 'action' && splitClauses.length >= 2 && score >= 6;
   // 逗号串提示：本可算复杂但拆镜器拆不动，交给人工处理
   const warnings = [];
   if (recommendSplit === false && kind === 'action' && hasCommaRun && splitClauses.length < 2) {

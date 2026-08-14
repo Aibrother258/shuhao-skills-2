@@ -195,7 +195,8 @@ console.log('[7] 复杂度评分 determinism');
       { sceneId: 'S01', lighting: '晨', characters: ['C01', 'C02'], props: ['P01'], flow: [
         { action: '他站着' },
         { action: '他走向窗前。拿起手机。看了一眼消息。脸色骤变。随后转身离开' },
-        { action: '他走向窗前，拿起手机，看了一眼消息，脸色骤变，随后转身离开' }
+        { action: '他走向窗前，拿起手机，看了一眼消息，脸色骤变，随后转身离开' },
+        { action: '浓雾把栈桥吃得只剩三步远。梆子声从岸上飘过来' }
       ] }
     ] }]
   };
@@ -214,6 +215,9 @@ console.log('[7] 复杂度评分 determinism');
   // 逗号串镜：评分仍高但 recommendSplit=false，且 warnings 提示人工处理（拆镜器拆不动）
   ok('逗号串镜 recommendSplit=false（拆镜器无法拆）', commaRun && commaRun.complexity && commaRun.complexity.recommendSplit === false, JSON.stringify(commaRun && commaRun.complexity));
   ok('逗号串镜 warnings 提示人工拆分', commaRun && Array.isArray(commaRun.warnings) && commaRun.warnings.some(w => /逗号串|人工/.test(w)), JSON.stringify(commaRun && commaRun.warnings));
+  // 方案 A 补强：简单建立镜（≥2 句号分句但 score 低）不推荐拆 —— 过滤掉"浓雾…。梆子声…"类微镜
+  const establish = shots.find(s => s.action.includes('浓雾把栈桥'));
+  ok('简单建立镜（2 分句但 score<6）recommendSplit=false', establish && establish.complexity && establish.complexity.recommendSplit === false, JSON.stringify(establish && establish.complexity));
 }
 
 // ── 8. export 平铺 Prompt 包：shots 四类文件产出 ──

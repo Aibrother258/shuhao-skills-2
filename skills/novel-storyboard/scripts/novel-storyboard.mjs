@@ -6,7 +6,7 @@
 // 零依赖、零 API key。所有约束由脚本确定性检查，不靠模型自觉。
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, resolve, basename, extname } from 'node:path';
+import { dirname, resolve, basename, extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -20,6 +20,7 @@ const DEFAULT_PARAMS = {
   tolerance: 0.15,       // 单集预估时长相对 script 目标时长的容差
   shotSecondsFloor: 1.5, // 单镜最短秒数
   shotSecondsCap: 10,    // 单镜最长秒数
+  splitSecondsFloor: 1.0, // split 子镜下限（更低，允许把短动作拍拆开；G4 对 split 镜用此值）
   style: 'semi-realistic', // 美术风格（与 art.json 对齐）
   // ── H3 (MiniMax H3) 视频提示词相关 ──
   promptFormat: 'h3',    // 'h3' = 生成 H3 结构化视频提示词；'legacy' = 仅首帧图生提示词
@@ -213,21 +214,15 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
           firstFrameCopyBlock: '',  // 可直接复制粘贴到 Krea2 ComfyUI 的首帧出图整块
           batch: nextBatch(sceneId, resolveLighting(sceneId, scene.lighting)),
           warnings: [],
+          complexity: scoreComplexity({ kind, sceneChars, beat, shotType, camera: '固定机位', props: scene.props || [] }),
           note: kind === 'vo' ? '心声/画外音：可不放说话人入画，仅给表情或空镜' : ''
         };
 
-        if (autofill && ctx) {
-          shot.prompt = composePrompt(shot, ctx, params);
-          shot.negativePrompt = composeNegative(shot, ctx);
-          shot.splitPrompt = composeSplitPrompt(shot, ctx, params);
-          shot.refImagePaths = composeRefImages(shot, ctx);
-          shot.continuity = composeContinuity(shot, ctx);
-          shot.firstFrameCopyBlock = composeFirstFrameCopyBlock(shot, ctx, params);
-          if (params.promptFormat !== 'legacy') {
-            shot.h3 = composeH3(shot, ctx, params, epSpeakerMap);
-            shot.h3CopyBlock = composeH3CopyBlock(shot, params);
-          }
-        }
+        // 把复杂度评分里的 warnings 合并进镜头级 warnings（逗号串/非动作镜提示）
+        const cmp = shot.complexity;
+        if (cmp && Array.isArray(cmp.warnings)) shot.warnings.push(...cmp.warnings);
+
+        if (autofill && ctx) autofillShot(shot, ctx, params, epSpeakerMap);
         shots.push(shot);
       });
     }
@@ -244,6 +239,133 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
 }
 
 function sumShotSeconds(shots) { return shots.reduce((a, s) => a + (s.durationSec || 0), 0); }
+
+// 镜头复杂度评分（确定性，不依赖模型）：用于判断"1 beat 是否该拆成多镜"。
+// 评分项：人数(互动) / 动作数 / 道具交互 / 情绪变化 / 镜头运动 / 空间变化。
+// 镜头复杂度评分（确定性，不依赖模型）。
+// 评分器与拆镜器共用同一把尺子：recommendSplit 只在「动作镜 + ≥2 个句号分句」时置 true，
+// 保证"推荐可拆"必然"拆得动"（拆镜器同样只拆动作镜、只按句号分句）。
+// 逗号串成的连续动作（如"拿起手机，看了一眼消息，脸色骤变"）不再计入可拆分句，
+// 改为通过 warnings 提示人工处理，避免"提示了却拆不动"。
+function scoreComplexity({ kind, sceneChars, beat, shotType, camera, props }) {
+  let score = 0;
+  const n = sceneChars.length;
+  if (n >= 2) score += 2;          // 多人互动
+  else if (n === 1) score += 1;    // 单角色在场
+
+  const actionText = (kind === 'action' ? (beat.action || '') : (beat.line || ''));
+
+  // 拆镜器可拆的分句：仅按句号/分号切（与 cmdSplit 一致，不含逗号）
+  const splitClauses = String(actionText).split(/[。；;]/).map(s => s.trim()).filter(Boolean);
+  // 逗号串标志：同一句号段内若存在逗号，说明是"逗号串成的连续动作"，拆镜器无法拆
+  const hasCommaRun = /[，,]/.test(actionText);
+
+  // 复杂度评分：沿用含逗号的全部分句（用于展示镜头繁忙程度）
+  const clauses = String(actionText).split(/[。；;，,]/).map(s => s.trim()).filter(Boolean);
+  const actionCount = Math.max(0, clauses.length - 1); // 1 段不加分，2 段 +1，3 段 +2 …
+  score += Math.min(actionCount, 4); // 动作连续变化，封顶 +4
+
+  if (props && props.length) score += 1; // 道具交互
+
+  // 情绪变化：动作文本含情绪/表情/脸色等线索
+  if (/表情|脸色|神情|情绪|惊讶|震惊|怒|悲|喜|慌|愣|怔|变色|骤变/.test(actionText)) score += 1;
+
+  if (camera && camera !== '固定机位') score += 1; // 镜头运动
+
+  // 空间变化：走向/转身/离开/走近/环顾等位移
+  if (/走[向过]|转身|离开|走近|环顾|四下|迈步|跨[出过]|挪[到动]/.test(actionText)) score += 2;
+
+  let level = 'simple';
+  if (score >= 7) level = 'high';
+  else if (score >= 4) level = 'normal';
+
+  // recommendSplit 与拆镜器对齐：仅动作镜 + ≥2 句号分句才推荐拆镜
+  const recommendSplit = kind === 'action' && splitClauses.length >= 2;
+  // 逗号串提示：本可算复杂但拆镜器拆不动，交给人工处理
+  const warnings = [];
+  if (recommendSplit === false && kind === 'action' && hasCommaRun && splitClauses.length < 2) {
+    warnings.push('逗号串成的连续动作，拆镜器无法自动拆分；如需拆镜请改为句号分句或人工处理');
+  } else if (kind !== 'action' && score >= 7) {
+    warnings.push('非动作镜复杂度偏高，但拆镜器仅拆动作镜，不自动拆分');
+  }
+
+  return { score, level, recommendSplit, splitClauses, warnings };
+}
+
+// seed 与 split 共用的 autofill：把结构化字段拼成可直接复制的提示词块。
+function autofillShot(shot, ctx, params, epSpeakerMap) {
+  shot.prompt = composePrompt(shot, ctx, params);
+  shot.negativePrompt = composeNegative(shot, ctx);
+  shot.splitPrompt = composeSplitPrompt(shot, ctx, params);
+  shot.refImagePaths = composeRefImages(shot, ctx);
+  shot.continuity = composeContinuity(shot, ctx);
+  shot.firstFrameCopyBlock = composeFirstFrameCopyBlock(shot, ctx, params);
+  if (params.promptFormat !== 'legacy') {
+    shot.h3 = composeH3(shot, ctx, params, epSpeakerMap || new Map());
+    shot.h3CopyBlock = composeH3CopyBlock(shot, params);
+  }
+}
+
+// 把复杂动作镜（complexity.recommendSplit 或指定 --shot）按分句拆成多条子镜。
+// 严守红线：① 所有子镜共享同一 sourceBeat（保证 G1 beat 覆盖门仍通过）；
+//           ② shotId 加小写后缀避免与 G2 唯一/格式门冲突；③ 时长按段数均分。
+function cmdSplit(args) {
+  const { pos, opts } = parseArgs(args);
+  const p = pos[0];
+  if (!p) { console.error('用法: split <storyboard.json> [--shot E01S001 | --auto] [--cast --art --outline] [--autofill] [--out 路径]'); process.exit(2); }
+  if (!opts.shot && !opts.auto) { console.error('需指定 --shot <shotId> 或 --auto（拆所有 recommendSplit 动作镜）'); process.exit(2); }
+  const doc = readDoc(p);
+  const ctx = resolveCtx(opts);
+  const params = paramsOf(doc);
+  if (opts['prompt-format']) params.promptFormat = opts['prompt-format'];
+  if (opts['h3-mode']) params.h3Mode = opts['h3-mode'];
+  const autofill = !!opts.autofill;
+  const target = opts.shot || null;
+
+  let splitCount = 0;
+  for (const ep of doc.episodes || []) {
+    const newShots = [];
+    for (const shot of ep.shots || []) {
+      const want = target ? (shot.shotId === target) : (shot.complexity && shot.complexity.recommendSplit);
+      if (!want || shot.beatKind !== 'action') { newShots.push(shot); continue; }
+      const clauses = String(shot.action || '').split(/[。；;]/).map(s => s.trim()).filter(Boolean);
+      if (clauses.length < 2) { newShots.push(shot); continue; } // 单段不拆
+      const splitFloor = params.splitSecondsFloor || 1.0;
+      const perRaw = (shot.durationSec || clauses.length) / clauses.length;
+      // 用更低的 splitFloor 判断能否拆：子镜各 ≥ splitFloor 即可（G4 对 split 镜也用此下限）
+      if (perRaw < splitFloor) { newShots.push(shot); continue; }
+      const per = Math.max(splitFloor, Math.round(perRaw * 10) / 10); // 每段至少 splitFloor
+      clauses.forEach((cl, i) => {
+        const suffix = String.fromCharCode(97 + i); // a,b,c…
+        const isLast = i === clauses.length - 1;
+        const sub = {
+          ...shot,
+          shotId: `${shot.shotId}${suffix}`,
+          action: cl,
+          durationSec: isLast
+            ? Math.round(Math.max(splitFloor, ((shot.durationSec || clauses.length) - per * (clauses.length - 1))) * 10) / 10
+            : per,
+          split: true, // 标记由 split 产生的子镜，G4 用 splitFloor 而非 shotSecondsFloor
+          sourceBeat: { ...shot.sourceBeat }, // 关键：沿用原 beat，守住覆盖率门
+          complexity: scoreComplexity({ kind: 'action', sceneChars: shot.characters, beat: { action: cl }, shotType: shot.shotType, camera: shot.camera, props: shot.props })
+        };
+        if (autofill && ctx) autofillShot(sub, ctx, params, new Map());
+        newShots.push(sub);
+      });
+      splitCount += 1;
+    }
+    ep.shots = newShots;
+  }
+
+  const outPath = opts.out ? resolve(opts.out) : resolve(process.cwd(), `${slugify(doc.source || 'storyboard')}-storyboard.split.json`);
+  writeFileSync(outPath, JSON.stringify(doc, null, 2));
+  const stats = computeStats(doc);
+  console.error(`✓ 已拆分 ${splitCount} 条复杂镜 → ${outPath}`);
+  console.error(`  现共 ${stats.totalShots} 条镜头 / 预估 ${fmtSec(stats.totalSeconds)}s`);
+  console.error(`  提示：拆分后请重新跑 validate 确认 G1/G2 仍通过，再 export 出 Prompt 包`);
+  return outPath;
+}
+
 
 // 首帧提示词合成（autofill）：场景光照 + 在场角色形象 + 道具状态 + 景别 + 风格
 function composePrompt(shot, ctx, params) {
@@ -263,7 +385,17 @@ function composePrompt(shot, ctx, params) {
       if (cast && cast.image && cast.image.prompt) {
         const p = cast.image.prompt;
         const slim = p.includes(' Three-quarter view') ? p.split(' Three-quarter view')[0] : p.slice(0, 400);
-        parts.push(slim.trim().replace(/[.]+$/, ''));
+        let seg = slim.trim().replace(/[.]+$/, '');
+        // Identity Lock：把不可变特征注入首帧，防止"第一镜一个脸、第二镜一个脸"
+        const anchors = (cast.identityAnchors && cast.identityAnchors.length) ? cast.identityAnchors : (cast.identity ? [cast.identity] : []);
+        if (anchors.length) seg += ', ' + anchors.join(', ');
+        // Wardrobe：展开角色服装（优先 continuity 指定的 wardrobeId，否则默认第一条）
+        const wId = shot.continuity && shot.continuity.characters && shot.continuity.characters[cid]
+          ? shot.continuity.characters[cid].wardrobe : null;
+        const wardrobe = (cast.wardrobe && cast.wardrobe.length)
+          ? (cast.wardrobe.find(w => w.id === wId) || cast.wardrobe[0]) : null;
+        if (wardrobe && wardrobe.prompt) seg += `, wearing ${wardrobe.prompt}`;
+        parts.push(seg);
       }
     }
   } else {
@@ -293,18 +425,28 @@ function composeSplitPrompt(shot, ctx, params) {
   return base.replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim();
 }
 
-// 本镜要用到的人物角色图路径（来自 cast.json，供首帧图生图 + H3 I2VA 复用）
-// 优先用 cast.image.portrait（干净单视角参考图，专供生成）；其次 cast.image.path；
-// 两者皆缺时退化为角色名占位，提示用户手动补图。
+// 本镜要用到的人物角色图路径（来自 cast.json，供首帧图生图 + H3 I2VA 复用）。
+// 按景别推荐最贴合的参考图：特写→portrait / 中景→halfBody / 全景→fullBody / 侧身→side；
+// 所选缺失时降级 portrait → path → 占位符（sheet 是提示词文本不是路径，永不进 refImagePaths），绝不阻断生成。
+const SHOT_REF_PREF = [
+  { types: ['特写', '大特写'], pick: ['portrait'] },
+  { types: ['近景', '过肩'], pick: ['portrait', 'halfBody'] },
+  { types: ['中景'], pick: ['halfBody', 'portrait'] },
+  { types: ['全景', '远景', '大远景'], pick: ['fullBody', 'halfBody', 'portrait'] },
+  { types: ['侧拍', '侧面'], pick: ['side', 'portrait'] }
+];
 function composeRefImages(shot, ctx) {
   const paths = [];
+  const pref = SHOT_REF_PREF.find(r => r.types.includes(shot.shotType)) || { pick: ['portrait'] };
   for (const cid of shot.characters) {
     const name = ctx.cidToName[cid];
     const cast = name && ctx.nameToCast[name];
     const img = cast && cast.image;
-    // 真实参考图路径优先于占位符：novel-characters 的 portrait 应指向干净单视角图
-    if (img && img.portrait) paths.push(img.portrait);
-    else if (img && img.path) paths.push(img.path);
+    let chosen = null;
+    for (const key of pref.pick) { if (img && img[key]) { chosen = img[key]; break; } }
+    if (!chosen && img && img.portrait) chosen = img.portrait;       // 降级 portrait（干净单视角图）
+    if (!chosen && img && img.path) chosen = img.path;               // 再降级 path（旧字段）
+    if (chosen) paths.push(chosen);
     else if (name) paths.push(`【角色图:${name}】`);
     else paths.push(`【角色图:${cid}】`);
   }
@@ -375,8 +517,8 @@ function h3Soundscape(shot, ctx, params) {
   const sceneName = sm ? sm.name : 'the location';
   const action = shot.action || shot.line || '';
 
-  // 环境底噪：与光照/场景名粗略对应
-  let ambience = `${sceneName} room tone continues`;
+  // 环境底噪：与光照/动作粗略对应（H3 规范提示词全英文，不内嵌中文场景名）
+  let ambience = 'Ambient room tone continues';
   if (sm && sm.lighting.length) {
     const lit = sm.lighting.find(l => l.state === shot.lighting) || sm.lighting[0];
     const lp = (lit.prompt || '').toLowerCase();
@@ -567,7 +709,7 @@ function gateReport(doc, ctx) {
     const idset = new Set();
     let dup = 0, bad = 0;
     for (const s of allShots) {
-      if (!/^E\d{2,}S\d{3,}$/.test(s.shotId || '')) bad += 1;
+      if (!/^E\d{2,}S\d{3,}[a-z]?$/.test(s.shotId || '')) bad += 1;
       if (idset.has(s.shotId)) dup += 1; idset.add(s.shotId);
     }
     push('shot-id', 'shotId 唯一且格式合规', dup === 0 && bad === 0, `重复 ${dup} / 格式错 ${bad}`);
@@ -607,7 +749,9 @@ function gateReport(doc, ctx) {
   let durBad = 0;
   for (const s of allShots) {
     const d = s.durationSec || 0;
-    if (d < params.shotSecondsFloor || d > params.shotSecondsCap) durBad += 1;
+    // split 子镜用更低的 splitSecondsFloor（允许短动作拍拆开），普通镜用 shotSecondsFloor
+    const floor = s.split ? (params.splitSecondsFloor || 1.0) : params.shotSecondsFloor;
+    if (d < floor || d > params.shotSecondsCap) durBad += 1;
   }
   let epBad = 0;
   if (ctx && ctx.script) {
@@ -999,15 +1143,129 @@ function cmdBatches(args) {
   for (const b of stats.batches) console.log(`${b.id}\t×${b.count}\t${b.shotIds.join(', ')}`);
 }
 
+// 把结构化 JSON 里分散的 Prompt 抽成"打开就能复制"的平铺文件。
+// 这是 Prompt Pipeline 的最后一公里：JSON 给 Agent、HTML 给人审、txt 给你直接粘进 ComfyUI/H3。
+function cmdExport(args) {
+  const { pos, opts } = parseArgs(args);
+  const p = pos[0];
+  if (!p) { console.error('用法: export <storyboard.json> [--cast <cast.json> --art <art.json>] [--out <dir>]'); process.exit(2); }
+  const doc = readDoc(p);
+  const ctx = resolveCtx(opts);
+  const base = opts.out ? resolve(opts.out) : resolve(process.cwd(), `${slugify(doc.source || 'storyboard')}-prompts`);
+  const dirs = {
+    characters: join(base, 'characters'),
+    scenes: join(base, 'scenes'),
+    props: join(base, 'props'),
+    shots: join(base, 'shots')
+  };
+  for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
+
+  // ── 角色 Prompt（来自 cast.json）──
+  let charN = 0;
+  if (ctx.cast && Array.isArray(ctx.cast.characters)) {
+    for (const c of ctx.cast.characters) {
+      const id = c.id || slugify(c.name);
+      const img = c.image || {};
+      const identity = (c.identityAnchors && Array.isArray(c.identityAnchors) && c.identityAnchors.length)
+        ? c.identityAnchors.join('\n- ')
+        : (c.identity || '');
+      const wardrobe = (c.wardrobe && Array.isArray(c.wardrobe) && c.wardrobe.length)
+        ? c.wardrobe.map(w => `  ${w.id} — ${w.prompt}`).join('\n')
+        : '';
+      const body = [
+        `=== ${c.name} 角色生成 Prompt ===`,
+        img.prompt ? img.prompt : '（cast.json 未提供 image.prompt）',
+        '',
+        identity ? `=== 不可变特征 Identity Lock（注入每个 Prompt 防脸崩）===\n- ${identity}` : '',
+        wardrobe ? `=== 服装 Wardrobe ===\n${wardrobe}` : '',
+        img.portrait ? `\n=== 参考图 Reference ===\n${img.portrait}` : (img.sheet ? `\n=== 参考图（设定板，仅作风格参考）===\n${img.sheet}` : '\n=== 参考图 ===\n（未提供，需先生成角色图）')
+      ].filter(Boolean).join('\n');
+      writeFileSync(join(dirs.characters, `${id}-${slugify(c.name)}.txt`), body + '\n');
+      charN += 1;
+    }
+  }
+
+  // ── 场景 Prompt（来自 art.json）──
+  let sceneN = 0;
+  if (ctx.art && Array.isArray(ctx.art.scenes)) {
+    for (const s of ctx.art.scenes) {
+      const lightingLines = (Array.isArray(s.lighting) ? s.lighting : [])
+        .map(l => `  [${l.state}] ${l.prompt || ''}`).join('\n');
+      const empty = s.image && s.image.prompt ? s.image.prompt : '（art.json 未提供空景提示词）';
+      const body = [
+        `=== ${s.name || s.id} 空景 Prompt ===`,
+        empty,
+        '',
+        lightingLines ? `=== 光照状态 Lighting ===\n${lightingLines}` : '',
+        s.image && s.image.negativePrompt ? `=== 反向提示词 ===\n${s.image.negativePrompt}` : ''
+      ].filter(Boolean).join('\n');
+      writeFileSync(join(dirs.scenes, `${s.id}-${slugify(s.name || s.id)}.txt`), body + '\n');
+      sceneN += 1;
+    }
+  }
+
+  // ── 道具 Prompt（来自 art.json）──
+  let propN = 0;
+  if (ctx.art && Array.isArray(ctx.art.props)) {
+    for (const pr of ctx.art.props) {
+      const states = (Array.isArray(pr.states) ? pr.states : [])
+        .map(st => `  [${st.state}] ${st.prompt || ''}`).join('\n');
+      const body = [
+        `=== ${pr.name || pr.id} 道具 Prompt（白底无手）===`,
+        pr.image && pr.image.prompt ? pr.image.prompt : '（art.json 未提供道具图提示词）',
+        '',
+        states ? `=== 状态变体 States ===\n${states}` : ''
+      ].filter(Boolean).join('\n');
+      writeFileSync(join(dirs.props, `${pr.id}-${slugify(pr.name || pr.id)}.txt`), body + '\n');
+      propN += 1;
+    }
+  }
+
+  // ── 镜头 Prompt（来自 storyboard 每条 shot 的 copy block）──
+  let shotN = 0;
+  for (const ep of doc.episodes || []) {
+    for (const s of ep.shots || []) {
+      const sd = join(dirs.shots, s.shotId);
+      mkdirSync(sd, { recursive: true });
+      const refLines = (s.refImagePaths && s.refImagePaths.length) ? s.refImagePaths.join('\n') : '（无）';
+      writeFileSync(join(sd, 'first-frame.txt'), `${s.firstFrameCopyBlock || s.splitPrompt || '（未 autofill，无首帧提示词）'}\n`);
+      writeFileSync(join(sd, 'negative.txt'), `${s.negativePrompt || '（无）'}\n`);
+      // h3.txt 直接写完整 h3CopyBlock（含首帧引用句 "For the target video... <Picture 1> is fully referenced"），
+      // 这是 I2VA 模式赖以定位首帧的关键信息；formatH3 仅 legacy 模式（无 h3CopyBlock）兜底。
+      writeFileSync(join(sd, 'h3.txt'), (s.h3CopyBlock || (s.h3 ? formatH3(s.h3) : '（legacy 模式无 H3 提示词）')) + '\n');
+      writeFileSync(join(sd, 'refs.txt'), `=== 本镜参考图 Reference（建议按景别取用）===\n${refLines}\n`);
+      shotN += 1;
+    }
+  }
+
+  console.error(`✓ 已导出 Prompt 包：${base}`);
+  console.error(`  角色 ${charN} / 场景 ${sceneN} / 道具 ${propN} / 镜头 ${shotN}`);
+  console.error(`  工作流：打开 → 复制 → 生成（角色/场景/道具供抽卡，shots/E01S001 供首帧+H3）`);
+  return base;
+}
+
+// 把 h3 对象格式化成可读文本块（与 h3CopyBlock 同源但独立于渲染器）
+function formatH3(h3) {
+  if (typeof h3 === 'string') return h3 + '\n';
+  const lines = [];
+  if (h3.mode) lines.push(`mode: ${h3.mode}`);
+  if (h3.integrated_multimodal_description) lines.push(`\n[integrated_multimodal_description]\n${h3.integrated_multimodal_description}`);
+  if (h3.overall_soundscape) lines.push(`\n[overall_soundscape]\n${h3.overall_soundscape}`);
+  if (h3.non_diegetic_music) lines.push(`\n[non_diegetic_music]\n${h3.non_diegetic_music}`);
+  return lines.join('\n') + '\n';
+}
+
 function main() {
   const [, , cmd, ...rest] = process.argv;
-  if (!cmd) { console.error('novel-storyboard v' + SCRIPT_VERSION); console.error('命令: seed | validate | checkup | render | batches'); process.exit(2); }
+  if (!cmd) { console.error('novel-storyboard v' + SCRIPT_VERSION); console.error('命令: seed | validate | checkup | render | batches | export | split'); process.exit(2); }
   switch (cmd) {
     case 'seed': return cmdSeed(rest);
     case 'validate': return cmdValidate(rest);
     case 'checkup': return cmdCheckup(rest);
     case 'render': return cmdRender(rest);
     case 'batches': return cmdBatches(rest);
+    case 'export': return cmdExport(rest);
+    case 'split': return cmdSplit(rest);
     default: console.error('未知命令: ' + cmd); process.exit(2);
   }
 }

@@ -27,6 +27,7 @@
 
 ```json
 {
+  "id": "C03",            // 可选但建议：稳定编号，脚本/分镜用 C01..C0n 引用；缺失时 export 以 name 兜底
   "name": "老周",
   "aliases": ["老伯"],
   "importance": "major",
@@ -86,6 +87,9 @@
 | `image.tags` | string[] | **英文** | 4–8 个风格标签 |
 | `image.sheet` | string | **英文** | **角色设定图**，16:9 三区版面：左约 34% 半身像（面部基准）／右上全身三视图／右下细节条，细线分隔；**禁止出现人名**；**必须写明族裔／年代／地域** |
 | `image.portrait` | string | — | **干净单视角参考图路径**（P0-1 新增）。指向一张半身/单视角角色图文件（如 `assets/cast/沈知微-portrait.png`），专供首帧出图与 H3 I2VA 复用。**不要直接拿 `sheet` 合成板当参考图**——多视图混排会污染角色一致性。`novel-storyboard` 的 `refImagePaths` 优先取此项；缺失时退化为 `【角色图:名】` 占位，`novel-project verify` 会报"参考图文件缺失"提醒补图 |
+| `image.halfBody` / `image.fullBody` / `image.side` | string | — | **可选**多视角参考图路径。storyboard 按景别自动推荐取用（特写→portrait／中景→halfBody／全景→fullBody／侧身→side），缺图时自动降级回 portrait。**生成这些图是你自己的事**（skill 只管字段+推荐+降级）。未提供则对应的景别降级到 portrait |
+| `wardrobe` | array | — | **可选**服装表 `[{id, prompt}]`。`id` 为稳定编号（如 `W01`），`prompt` 为**英文服装描述**（如 `a dark charcoal wool suit, white dress shirt, black leather shoes`）。storyboard 拼首帧提示词时自动展开 `wearing <prompt>`，并与 continuity 的 `wardrobe` 字段共用同一份 ID；缺省时首帧不注入服装 |
+| `identityAnchors` | array | **英文** | **可选**不可变特征锚点（如 `["rectangular face", "deep-set eyes", "short side-parted hair", "small scar above left eyebrow"]`）。会被注入每个首帧/H3 Prompt（Identity Lock），防止"第一镜一个脸、第二镜一个脸"。缺省时回退到 `persona.identity` 单句 |
 | `voice.timbre/pitch/pace/accent/emotion/referenceHint` | string | **本地语言** | 最容易写漂的地方，注意 |
 | `voice.prompt` | string | **英文** | 给 TTS 音色设计引擎 |
 | `voice.promptLocal` | string | 本地语言 | 上面那条的译文；`lang=en` 时省略 |

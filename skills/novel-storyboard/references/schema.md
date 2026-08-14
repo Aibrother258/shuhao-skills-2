@@ -62,8 +62,9 @@
 | `prompt` | **模型填**（autofill 可自动合成） | 首帧生成提示词，**必须英文**（图生视频 I2VA/FL2VA 的首帧或 T2V 底图） |
 | `splitPrompt` | autofill 生成 | 纯文本首帧提示词（单行），**可直接复制进 Krea2 ComfyUI 文生图/图生图节点** |
 | `negativePrompt` | **模型填**（autofill 可自动合成） | 反向提示词，**必须英文** |
-| `refImagePaths` | autofill 生成 | 本镜引用的人物角色图路径清单（**优先**用 `cast.json` 的 `image.portrait`（干净单视角参考图，专供生成）；其次 `image.path`；两者皆缺退化为 `【角色图:名】` 占位，提示用户补图），供首帧图生图与 H3 I2VA 复用 |
-| `continuity` | autofill 注入骨架（P0-3） | 连续性状态块：`{ characters: {cid:{name,wardrobe,emotion,state,position}}, props:{pid:{name,state}}, scene:{lighting,weather,time} }`。给出每镜的状态快照，供 `novel-project verify` 跨镜状态机比对（服装跳变、道具状态突变、光照突变告警）。缺省留空待模型 seed 后精修 |
+| `refImagePaths` | autofill 生成 | 本镜引用的人物角色图路径清单，**按景别推荐取用**：特写→`portrait`／近景·过肩→`portrait`(或`halfBody`)／中景→`halfBody`／全景·远景→`fullBody`／侧身→`side`。所选缺失时自动降级 `portrait → sheet → 【角色图:名】` 占位（`cast.json` 的多视角字段可选，skill 只管推荐+降级，生成图是你自己的事）。供首帧图生图与 H3 I2VA 复用 |
+| `complexity` | autofill 生成（P0） | 镜头复杂度评分：`{ score, level: 'simple'\|'normal'\|'high', recommendSplit: bool, splitClauses: string[], warnings: string[] }`。`score` 为确定性打分（人数/互动、动作分句数、道具交互、情绪变化、镜头运动、空间位移），仅用于展示镜头繁忙程度；**`recommendSplit` 与拆镜器共用同一把尺子**：仅当「动作镜 + ≥2 个句号/分号分句」时置 `true`，保证"推荐可拆"必然"拆得动"（`split --auto` 据此拆分，同样只拆动作镜、只按句号分句）。逗号串成的连续动作（如"拿起手机，看了一眼消息"）不计入可拆分句，由 `warnings` 提示人工处理，避免"提示了却拆不动" |
+| `continuity` | autofill 注入骨架（P0-3） | 连续性状态块：`{ characters: {cid:{name,wardrobe,emotion,state,position}}, props:{pid:{name,state}}, scene:{lighting,weather,time} }`。`wardrobe` 为服装 ID（如 `W01`），与 `cast.json` 的 `wardrobe` 表共用同一份 ID——既用于连续性检查，也由 `composePrompt` 展开成 `wearing <prompt>` 注入首帧。`identityAnchors` 不可变特征由 `composePrompt` 注入首帧（Identity Lock），防跨镜脸崩。缺省留空待模型 seed 后精修 |
 | `firstFrameCopyBlock` | autofill 生成 | **首帧出图整块**：正向提示词 + 反向提示词 + 参考图，分块标注，**可直接复制粘贴到 Krea2 ComfyUI 工作流** |
 | `h3` | autofill 生成（仅 `promptFormat=h3`） | H3 视频提示词三段式（见下），`mode` 为 `I2VA`/`T2VA`；I2VA 额外带 `firstFrameReference`/`characterReference` |
 | `h3CopyBlock` | autofill 生成（仅 `promptFormat=h3`） | **视频生成整块**：首帧引用句(I2VA) + 三段式字段，分块标注，**可直接复制粘贴到 MiniMax H3 ComfyUI 工作流** |

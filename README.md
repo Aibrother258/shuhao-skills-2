@@ -19,7 +19,7 @@
 | [**novel-outline**](skills/novel-outline) | 把一本小说改编成短剧大纲五件套：改编说明、人物表、爽点表、分集梗概、资产清单。13 道质量门全部脚本检查，支持已有大纲的体检模式 |
 | [**novel-art**](skills/novel-art) | 给 AI 短剧出美术设定集（场景 + 叙事道具）：一致性锚点、光照与状态变体、尺度参照、无人无手白底提示词。吃 outline.json 预填清单，11 道质量门全部脚本检查 |
 | [**novel-script**](skills/novel-script) | 给 AI 短剧写剧本：场次 + 节拍流（动作与台词交替），逐集时长按语速确定性折算，台词本按角色聚合直接对接 TTS。9 道质量门全部脚本检查 |
-| [**novel-storyboard**](skills/novel-storyboard) | 把剧本拆成镜头级生产单：镜号/景别/机位/时长/首帧提示词/H3 视频提示词/生成批次，可直接粘进 Krea2 + MiniMax H3 的 ComfyUI 工作流。17 道质量门全部脚本检查 |
+| [**novel-storyboard**](skills/novel-storyboard) | 把剧本编译成镜头级生产单：镜号/景别/机位/时长/首帧提示词/H3 视频提示词/生成批次，`export` 还能平铺成 `prompts/` 目录让你打开即复制，`split` 把复杂动作镜自动拆成子镜（1 beat = 1+ shot）。可直接粘进 Krea2 + MiniMax H3 的 ComfyUI 工作流。17 道质量门全部脚本检查 |
 | [**novel-project**](skills/novel-project) | 项目总控：一个 project.json 串起五份产物，`status` 看进度与生产状态（每镜 storyboard/首帧/视频/TTS 阶段机 + 失效传播进度条）、`build` 告诉你下一步、`verify` 做跨层契约校验 + 跨镜连续性状态机（服装/道具/光照跳变告警） |
 | [**h3-prompt-writing**](skills/h3-prompt-writing) | MiniMax H3 提示词规范源：基础四模式 + Ref2VA 六段式重写，novel-storyboard 的 H3 提示词按它生成 |
 

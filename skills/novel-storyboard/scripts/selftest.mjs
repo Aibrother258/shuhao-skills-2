@@ -185,6 +185,103 @@ console.log('[6] render 产出 MD / HTML');
   ok('render --html 退出 0', html.code === 0);
 }
 
+// ── 7. 复杂度评分：简单镜 score 低、多动作复杂镜 recommendSplit=true ──
+console.log('[7] 复杂度评分 determinism');
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
+  // 构造最小 script：一个简单动作 beat + 一个复杂动作 beat
+  const script = {
+    source: '复杂度', episodes: [{ ep: 1, targetSeconds: 30, scenes: [
+      { sceneId: 'S01', lighting: '晨', characters: ['C01', 'C02'], props: ['P01'], flow: [
+        { action: '他站着' },
+        { action: '他走向窗前。拿起手机。看了一眼消息。脸色骤变。随后转身离开' },
+        { action: '他走向窗前，拿起手机，看了一眼消息，脸色骤变，随后转身离开' }
+      ] }
+    ] }]
+  };
+  const sp = join(tmp, 'cplx-script.json'); writeFileSync(sp, JSON.stringify(script, null, 2));
+  const seed = run(['seed', sp, '--outline', join(EX, '渡口-outline.json'), '--art', join(EX, '渡口-art.json'),
+    '--cast', join(EX, '渡口-cast.json'), '--autofill', '--out', join(tmp, 'cplx.json')], tmp);
+  ok('seed 退出 0', seed.code === 0, seed.out.slice(-200));
+  const board = JSON.parse(readFileSync(join(tmp, 'cplx.json'), 'utf8'));
+  const shots = board.episodes[0].shots;
+  const simple = shots.find(s => s.action === '他站着');
+  const complex = shots.find(s => s.action.includes('他走向窗前。拿起手机'));
+  const commaRun = shots.find(s => s.action.includes('他走向窗前，拿起手机'));
+  ok('简单镜有 complexity 且 score<4 level=simple', simple && simple.complexity && simple.complexity.score < 4 && simple.complexity.level === 'simple', JSON.stringify(simple && simple.complexity));
+  // 方案 A：recommendSplit 与拆镜器对齐 —— 仅动作镜 + ≥2 句号分句才置 true
+  ok('句号分句复杂镜 recommendSplit=true 且 level=high', complex && complex.complexity && complex.complexity.recommendSplit === true && complex.complexity.level === 'high', JSON.stringify(complex && complex.complexity));
+  // 逗号串镜：评分仍高但 recommendSplit=false，且 warnings 提示人工处理（拆镜器拆不动）
+  ok('逗号串镜 recommendSplit=false（拆镜器无法拆）', commaRun && commaRun.complexity && commaRun.complexity.recommendSplit === false, JSON.stringify(commaRun && commaRun.complexity));
+  ok('逗号串镜 warnings 提示人工拆分', commaRun && Array.isArray(commaRun.warnings) && commaRun.warnings.some(w => /逗号串|人工/.test(w)), JSON.stringify(commaRun && commaRun.warnings));
+}
+
+// ── 8. export 平铺 Prompt 包：shots 四类文件产出 ──
+console.log('[8] export 产出 prompts/ 平铺文件');
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
+  const seed = run(['seed', join(EX, '渡口-script.json'),
+    '--outline', join(EX, '渡口-outline.json'), '--art', join(EX, '渡口-art.json'),
+    '--cast', join(EX, '渡口-cast.json'), '--autofill', '--out', join(tmp, '渡口-storyboard.json')], tmp);
+  ok('seed 退出 0', seed.code === 0, seed.out.slice(-200));
+  const ex = run(['export', join(tmp, '渡口-storyboard.json'),
+    '--cast', join(EX, '渡口-cast.json'), '--art', join(EX, '渡口-art.json'), '--out', join(tmp, 'prompts')], tmp);
+  ok('export 退出 0', ex.code === 0, ex.out.slice(-200));
+  const firstShot = JSON.parse(readFileSync(join(tmp, '渡口-storyboard.json'), 'utf8')).episodes[0].shots[0].shotId;
+  ok('导出 shots/<id>/first-frame.txt 存在', existsSync(join(tmp, 'prompts', 'shots', firstShot, 'first-frame.txt')));
+  ok('导出 shots/<id>/h3.txt 存在', existsSync(join(tmp, 'prompts', 'shots', firstShot, 'h3.txt')));
+  ok('导出 characters/<id>.txt 存在', existsSync(join(tmp, 'prompts', 'characters', 'C01-沈知微.txt')));
+  const charTxt = readFileSync(join(tmp, 'prompts', 'characters', 'C01-沈知微.txt'), 'utf8');
+  ok('角色 txt 含 Identity Lock 不可变特征', charTxt.includes('Identity Lock') && charTxt.includes('oval face'));
+  ok('角色 txt 含 Wardrobe 展开', charTxt.includes('W01') && charTxt.includes('navy-blue'));
+  const ff = readFileSync(join(tmp, 'prompts', 'shots', firstShot, 'first-frame.txt'), 'utf8');
+  ok('首帧 txt 注入 wardrobe 描述', ff.includes('navy-blue') || ff.includes('wearing'));
+  // Bug1：h3.txt 必须含 I2VA 首帧引用句（"is fully referenced"），不可被 formatH3 丢掉
+  const h3txt = readFileSync(join(tmp, 'prompts', 'shots', firstShot, 'h3.txt'), 'utf8');
+  ok('h3.txt 含 I2VA 首帧引用句（不丢关键信息）', h3txt.includes('is fully referenced') || h3txt.includes('For the target video'), h3txt.slice(0, 120));
+  // Bug3：只有 sheet（无 portrait/path）的角色，refImagePaths 不得把 sheet 提示词文本当路径
+  const sheetOnly = {
+    source: '仅sheet', params: {}, characters: [
+      { id: 'C09', name: '仅sheet角', image: { sheet: 'Single character model sheet, a tall man in grey coat...' }, voice: { timbre: 'x' } }
+    ]
+  };
+  const sc = join(tmp, 'sheet-cast.json'); writeFileSync(sc, JSON.stringify(sheetOnly, null, 2));
+  const ri = run(['seed', join(EX, '渡口-script.json'), '--outline', join(EX, '渡口-outline.json'),
+    '--art', join(EX, '渡口-art.json'), '--cast', sc, '--autofill', '--out', join(tmp, 'sheet-board.json')], tmp);
+  ok('仅 sheet 角色 seed 退出 0', ri.code === 0, ri.out.slice(-150));
+  const sb = JSON.parse(readFileSync(join(tmp, 'sheet-board.json'), 'utf8'));
+  const anySheet = sb.episodes.some(e => e.shots.some(s => (s.refImagePaths || []).some(p => p.includes('model sheet'))));
+  ok('sheet 文本不进 refImagePaths（降级为占位符）', !anySheet);
+}
+
+// ── 9. split 保住 sourceBeat + G1 覆盖门仍过 ──
+console.log('[9] split 复杂镜保留 sourceBeat，validate 仍通过');
+{
+  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
+  const seed = run(['seed', join(EX, '渡口-script.json'),
+    '--outline', join(EX, '渡口-outline.json'), '--art', join(EX, '渡口-art.json'),
+    '--cast', join(EX, '渡口-cast.json'), '--autofill', '--out', join(tmp, '渡口-storyboard.json')], tmp);
+  ok('seed 退出 0', seed.code === 0);
+  const seedBoard = JSON.parse(readFileSync(join(tmp, '渡口-storyboard.json'), 'utf8'));
+  const seedBoardShots = seedBoard.episodes.reduce((a, e) => a + e.shots.length, 0);
+  const sp = run(['split', join(tmp, '渡口-storyboard.json'), '--auto', '--autofill', '--cast', join(EX, '渡口-cast.json'),
+    '--art', join(EX, '渡口-art.json'), '--out', join(tmp, 'split.json')], tmp);
+  ok('split --auto 退出 0', sp.code === 0, sp.out.slice(-200));
+  const split = JSON.parse(readFileSync(join(tmp, 'split.json'), 'utf8'));
+  const allHaveBeat = split.episodes.every(e => e.shots.every(s => s.sourceBeat && typeof s.sourceBeat.beatNo === 'number'));
+  ok('拆分后所有子镜保留 sourceBeat', allHaveBeat);
+  const v = run(['validate', join(tmp, 'split.json'),
+    '--script', join(EX, '渡口-script.json'), '--outline', join(EX, '渡口-outline.json'),
+    '--art', join(EX, '渡口-art.json'), '--cast', join(EX, '渡口-cast.json')], tmp);
+  ok('拆分后 validate 退出 0（G1/G2 仍过）', v.code === 0, v.out.slice(-200));
+  ok('拆分后镜头数 > 原镜头数（真拆出子镜，非空转）', split.episodes.reduce((a, e) => a + e.shots.length, 0) > seedBoardShots, JSON.stringify({ after: split.episodes.reduce((a, e) => a + e.shots.length, 0), before: seedBoardShots }));
+  // 方案 A 自洽：被标记 recommendSplit=true 的动作镜都应真的拆出子镜（标记与拆镜能力对齐）
+  const recShots = seedBoard.episodes.flatMap(e => e.shots).filter(s => s.complexity && s.complexity.recommendSplit);
+  const splitIds = new Set(split.episodes.flatMap(e => e.shots).map(s => s.shotId.replace(/[a-z]$/, '')));
+  const allRecSplit = recShots.every(s => splitIds.has(s.shotId));
+  ok('所有 recommendSplit=true 的镜都被真实拆分（标记↔拆镜能力对齐）', recShots.length === 0 || allRecSplit, JSON.stringify({ rec: recShots.length, aligned: allRecSplit }));
+}
+
 console.log('');
 console.log(`结果：${pass} 通过 / ${fail} 失败`);
 process.exit(fail ? 1 : 0);

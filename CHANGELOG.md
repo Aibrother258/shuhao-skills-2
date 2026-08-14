@@ -1,5 +1,17 @@
 # Changelog
 
+## novel-storyboard — Prompt Pipeline 最后一公里（2026-08-14c）
+
+把"结构化 JSON"补成"你直接能复制去生的 Prompt 文件"，对齐最新 ChatGPT/DeepSeek 收敛后的定位（**Shuohao AI Drama Prompt Pipeline**，不是生产 OS）：
+
+- **`export` 命令**：把 storyboard 内嵌的可复制提示词平铺成 `prompts/` 目录——`characters/`（形象+Identity Lock+Wardrobe）、`scenes/`（空景+各光照）、`props/`（白底无手+状态）、`shots/<id>/{first-frame,negative,h3,refs}.txt`。工作流变成"打开→复制→ComfyUI/H3 生成"
+- **复杂度评分**：seed 时确定性打 `complexity{score,level,recommendSplit,splitClauses,warnings}`。`recommendSplit` 与拆镜器共用一把尺子——仅「动作镜 + ≥2 个句号/分号分句」置 `true`，保证"推荐可拆"必然"拆得动"；逗号串连续动作不计入可拆分句，由 `warnings` 提示人工处理
+- **`split` 拆镜子命令**：把 `recommendSplit=true` 的动作镜按**句号分句**拆成子镜、时长按比例分配；严守契约——子镜沿用原 `sourceBeat`（G1 覆盖门仍过）、shotId 加 `a/b/c` 后缀（G2 正则放宽）、子镜时长下限保护（避免 G4 越界）
+- **Wardrobe Bible + Identity Lock**：`cast.json` 加 `wardrobe[{id,prompt}]` 与 `identityAnchors[]`；首帧提示词自动展开 `wearing <prompt>` 并注入不可变特征（防跨镜脸崩）；continuity 的 `wardrobe` 与 wardrobe 表共用同一份 ID
+- **按景别推荐参考图**：`cast.image` 支持可选 `halfBody/fullBody/side`，`composeRefImages` 按 shotType 推荐（特写→portrait／中景→halfBody／全景→fullBody），缺失自动降级 `portrait→sheet→占位符`
+- 自测 19 → **41**（复查修复 3 个真 bug：h3.txt 丢 I2VA 首帧引用句 / split 真实数据空转 / sheet 文本当路径；+ 2 个次要：cast 字段补齐 / soundscape 去中文；+ 复测残留：`recommendSplit` 与 `split` 口径对齐，逗号串改 warnings 提示）；全仓库 check.mjs 全绿；lint 0
+- 红线守住：零依赖、确定性、不新建 manifest/schemas、skill 自包含。明确不做三层 Compiler 架构 / 强制每角色 4 张图 / 中央 schemas 目录
+
 ## novel-project — 复查修复（2026-08-14b 补）
 
 对 2026-08-14b 的 P0 迭代做代码级复查，修掉四个真 bug（自测 21 → 29 项，全仓库 819 项）：

@@ -141,6 +141,8 @@ node scripts/selftest.mjs
 | `checkup <storyboard.json> [...]` | 纯文本质量门明细 |
 | `render <storyboard.json> [--md\|--html] [--out 路径]` | 渲染报告（含每条镜头可复制提示词块） |
 | `batches <storyboard.json>` | 列出生成批次单 |
+| `export <storyboard.json> [--cast --art] [--out 路径]` | 最后一公里：把分散在 JSON 里的提示词平铺导出为 `prompts/` 目录（characters/scenes/props/shots 四类 txt），打开即复制 |
+| `split <storyboard.json> [--shot E01S001 \| --auto] [--autofill] [--out 路径]` | 把复杂动作镜（标记为 `recommendSplit=true`，即动作镜 + ≥2 句号分句）按分句拆成多条子镜，时长按比例分配，保留 `sourceBeat`（G1 覆盖门仍过）。逗号串成的连续动作不自动拆，由 `warnings` 提示人工处理 |
 
 ### 端到端 ComfyUI 工作流
 

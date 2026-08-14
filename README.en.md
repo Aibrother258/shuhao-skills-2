@@ -5,7 +5,7 @@
 
 # shuohao-skills
 
-**Agent skills for AI short-drama production** — from a novel to shoot-ready material: character bibles, adaptation outlines, scene & prop bibles, screenplays. Built for AI coding agents, **runs in both Claude Code and codex**.
+**Agent skills for AI short-drama production** — from a novel to shoot-ready material: character bibles, adaptation outlines, scene & prop bibles, screenplays, shot-level storyboards, plus a project controller that strings the five layers into a trackable pipeline. Built for AI coding agents, **runs in both Claude Code and codex**.
 
 | Skill | What it does |
 | --- | --- |
@@ -13,8 +13,11 @@
 | [**novel-outline**](skills/novel-outline/README.en.md) | Adapts a novel into a five-piece short-drama outline: adaptation notes, cast, beats, per-episode synopses, asset list. All 13 quality gates are script-checked; includes a checkup mode for existing outlines |
 | [**novel-art**](skills/novel-art/README.en.md) | Art bibles for AI production (scenes + narrative props): consistency anchors, lighting & state variants, scale references, no-people/no-hands white plates. Seeds from outline.json; all 11 quality gates script-checked |
 | [**novel-script**](skills/novel-script/README.en.md) | Screenwriting for AI short drama: scenes + beat flow (action beats alternating with dialogue lines), per-episode duration deterministically estimated from reading speed, a per-character line book that feeds straight into TTS. All 9 quality gates script-checked |
+| [**novel-storyboard**](skills/novel-storyboard/README.en.md) | Breaks the script into a shot-level production sheet: shot ids, shot types, camera, durations, first-frame prompts, H3 video prompts, generation batches — paste-ready for a Krea2 + MiniMax H3 ComfyUI workflow. All 17 quality gates script-checked |
+| [**novel-project**](skills/novel-project/README.en.md) | Project control: one project.json ties the five outputs together. `status` shows progress, `build` tells you what to run next, `verify` runs cross-layer contract checks (episodes, characters, scenes, lighting, props, durations) |
+| [**h3-prompt-writing**](skills/h3-prompt-writing/README.en.md) | Spec source for MiniMax H3 prompts: the four base modes plus the six-section Ref2VA rewrite. novel-storyboard generates its H3 prompts against it |
 
-Point it at a novel and you get all four:
+Point it at a novel and you get all five:
 
 **novel-characters · character bible**
 
@@ -31,6 +34,11 @@ Point it at a novel and you get all four:
 **novel-script · screenplay (duration gauge + episode scripts + line book)**
 
 ![Screenplay report](skills/novel-script/assets/report.webp)
+
+**novel-storyboard · shot-level production sheet (first-frame prompts + H3 video prompts + batches)**
+
+Storyboards are generated deterministically; sample report and the end-to-end ComfyUI
+workflow live in the [demo](skills/novel-storyboard/demo/README.md).
 
 ## Install
 
@@ -81,12 +89,20 @@ skills/<skill-name>/
 └── assets/           screenshots
 ```
 
-Two hard requirements:
+Three hard requirements:
 
 - Every skill must have a `SKILL.md`
 - Every skill must have a `scripts/selftest.mjs` that **calls no model and costs no quota**, covering all deterministic logic
+- Every skill must have `README.md` / `README.en.md`, and frontmatter with `name` / `version` / `description` / `triggers`
 
-Run every self-test before adding a skill:
+Run the repo-level check plus every self-test before adding a skill:
+
+```bash
+node scripts/check.mjs --run
+```
+
+`check.mjs` enforces the structural requirements (SKILL.md / self-test / bilingual README /
+frontmatter); `--run` also executes every self-test. Self-tests only:
 
 ```bash
 for f in skills/*/scripts/selftest.mjs; do node "$f"; done

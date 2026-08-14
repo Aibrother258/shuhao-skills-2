@@ -11,7 +11,7 @@
 
 # shuohao-skills
 
-**AI 短剧制作的 skill 集合**：从一本小说到能开拍的制作素材——拆角色、排大纲、出场景与道具设定、写剧本。给 AI 编码 agent 用，**Claude Code 和 codex 都能跑**。
+**AI 短剧制作的 skill 集合**：从一本小说到能开拍的制作素材——拆角色、排大纲、出场景与道具设定、写剧本、拆分镜，外加一个项目总控把五层串成一条可追踪的产线。给 AI 编码 agent 用，**Claude Code 和 codex 都能跑**。
 
 | Skill | 做什么 |
 | --- | --- |
@@ -19,8 +19,11 @@
 | [**novel-outline**](skills/novel-outline) | 把一本小说改编成短剧大纲五件套：改编说明、人物表、爽点表、分集梗概、资产清单。13 道质量门全部脚本检查，支持已有大纲的体检模式 |
 | [**novel-art**](skills/novel-art) | 给 AI 短剧出美术设定集（场景 + 叙事道具）：一致性锚点、光照与状态变体、尺度参照、无人无手白底提示词。吃 outline.json 预填清单，11 道质量门全部脚本检查 |
 | [**novel-script**](skills/novel-script) | 给 AI 短剧写剧本：场次 + 节拍流（动作与台词交替），逐集时长按语速确定性折算，台词本按角色聚合直接对接 TTS。9 道质量门全部脚本检查 |
+| [**novel-storyboard**](skills/novel-storyboard) | 把剧本拆成镜头级生产单：镜号/景别/机位/时长/首帧提示词/H3 视频提示词/生成批次，可直接粘进 Krea2 + MiniMax H3 的 ComfyUI 工作流。17 道质量门全部脚本检查 |
+| [**novel-project**](skills/novel-project) | 项目总控：一个 project.json 串起五份产物，`status` 看进度、`build` 告诉你下一步、`verify` 做跨层契约校验（集数/角色/场景/光照/道具/时长全部交叉对账） |
+| [**h3-prompt-writing**](skills/h3-prompt-writing) | MiniMax H3 提示词规范源：基础四模式 + Ref2VA 六段式重写，novel-storyboard 的 H3 提示词按它生成 |
 
-丢一本小说进去，出这四套：
+丢一本小说进去，出这五套：
 
 **novel-characters · 角色设定集**
 
@@ -37,6 +40,10 @@
 **novel-script · 剧本（时长仪表 + 分集剧本 + 台词本）**
 
 ![剧本报告](skills/novel-script/assets/report.webp)
+
+**novel-storyboard · 分镜表（每镜带首帧提示词 + H3 视频提示词 + 生成批次）**
+
+分镜表由脚本确定性生成，报告样例和端到端 ComfyUI 工作流见 [demo](skills/novel-storyboard/demo/README.md)。
 
 ## 安装
 
@@ -85,12 +92,20 @@ skills/<skill-name>/
 └── assets/           截图
 ```
 
-两条硬要求：
+三条硬要求：
 
 - 每个 skill 必须有 `SKILL.md`
 - 每个 skill 必须有 `scripts/selftest.mjs`，**不调用模型、不花额度**，覆盖全部确定性逻辑
+- 每个 skill 必须有 `README.md` / `README.en.md`，frontmatter 带 `name` / `version` / `description` / `triggers`
 
-加新 skill 之前，先把全部自测跑一遍：
+加新 skill 之前，先跑仓库级检查 + 全部自测：
+
+```bash
+node scripts/check.mjs --run
+```
+
+`check.mjs` 校验每个 skill 的结构硬要求（SKILL.md / 自测 / 双语 README / frontmatter），
+`--run` 再把全部自测跑一遍。想只跑自测也可以：
 
 ```bash
 for f in skills/*/scripts/selftest.mjs; do node "$f"; done

@@ -1,5 +1,54 @@
 # Changelog
 
+## novel-project 1.0.0 — 2026-08-14
+
+**项目总控：五层产物串成一条可追踪的产线**
+
+六个 skill 各产一份 JSON、各有质量门，但单层的 validate 只保证"自己那份合法"——
+没人回答"我现在在做哪部剧、做到哪一步、各层对得上吗"。新增的总控层补的就是这个：
+
+- `project.json`：项目 id / 剧名 / 集数 / 单集分钟 / 五份产物的路径 / 每层状态
+- `status`：五层文件就位情况 + 记录状态，`--verify` 连契约一起看
+- `build`：按 DAG（大纲 → 角色 → 美术 → 剧本 → 分镜）找缺口，打印下一步该跑哪个 skill
+- `verify`：**跨层契约校验**，只查跨层引用、不重复各层自己的质量门
+
+跨层契约抓到的最有价值的三类问题（单层校验器都漏）：
+
+- 剧本某场没写光照、美术里有可用状态——script 的 validate 把空光照当"没提供"跳过
+- 分镜光照与剧本该场不一致——storyboard 只查美术登记，不回头对剧本
+- 集数 / 时长在层与层之间漂移、角色/场景/道具 id 引用悬空
+
+自测 15 项，每道契约都有击穿用例。自带样例 `examples/渡口-project.json` 把仓库里
+五份《渡口》产物串成一个项目，跑 `build` 能看到它怎么推你走下一步。
+
+## novel-storyboard 1.0.0 — 2026-08-14
+
+**规范化收尾 + 光照继承修复**
+
+- frontmatter 补全 version / allowed-tools / triggers / metadata，与仓库其他 skill 对齐
+- 新增 README.en.md
+- **修复 seed 光照 bug**：之前固定取美术场景的第一个光照状态，导致剧本第 6 集
+  S01 写的是「雾散近岸」、分镜却用了「晨雾」。现在光照优先级改为
+  **剧本该场指定（且美术已登记）> 美术第一个状态 > 默认**——剧本改光照，分镜跟着走
+
+## h3-prompt-writing 1.0.0 — 2026-08-14
+
+**补齐仓库硬要求**
+
+- 新增 `scripts/selftest.mjs`（8 项断言）：核心字段顺序、I2VA 引用句式、时间戳、
+  `<d>` 台词封装、Ref2VA 六 section 顺序、保留分析判定词——防止规范文档被改散
+- frontmatter 补 version；新增 README.md / README.en.md
+
+## 仓库 — 2026-08-14
+
+**结构检查脚本 + 文档更新**
+
+- 新增 `scripts/check.mjs`：校验每个 skill 的结构硬要求（SKILL.md / selftest /
+  双语 README / frontmatter 五要素），`--run` 连全部自测一起跑——h3 那种
+  "装上去但没自测"的漏网之鱼以后进不了仓库
+- README 中英文补全 novel-storyboard / novel-project / h3-prompt-writing 三个条目，
+  硬要求从两条扩到三条
+
 ## novel-characters 1.7.0 — 2026-08-13
 
 **归并复核、cast.json 机器合成、更大的块**

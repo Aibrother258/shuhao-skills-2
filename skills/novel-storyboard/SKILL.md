@@ -1,6 +1,29 @@
 ---
 name: novel-storyboard
+version: 1.0.0
 description: 把 AI 短剧剧本拆成可生成的分镜表。输入 novel-script 产出的 script.json（剧本：场次+节拍流+台词），可选地账 novel-art(art.json)、novel-characters(cast.json)、novel-outline(outline.json)，产出带镜号/景别/机位/时长/首帧提示词/H3视频提示词/生成批次的分镜表 storyboard.json，并附 MD/HTML 报告。零依赖、零 API key。当用户说"出分镜""做分镜表""把剧本拆成一镜一镜""给每个镜头写生成提示词""分镜提示词""MiniMax H3 视频提示词""H3 格式提示词"时触发。剧本管戏，分镜管拍——本 skill 紧接 novel-script 下游，把剧本落成镜头级生产单。
+allowed-tools:
+  - Read
+  - Write
+  - Bash
+  - Task
+  - Glob
+triggers:
+  - novel-storyboard
+  - 出分镜
+  - 做分镜表
+  - 分镜提示词
+  - 首帧提示词
+  - H3 视频提示词
+  - H3 格式提示词
+metadata:
+  license: Apache-2.0
+  requires:
+    bins:
+      - node          # >= 18，只用标准库，无 npm 依赖
+  runtimes:
+    - claude-code
+    - codex
 ---
 
 # novel-storyboard · 分镜表
@@ -47,6 +70,8 @@ node scripts/novel-storyboard.mjs seed <script.json> \
 ```
 - 每个 beat → 一条 shot（动作/台词/心声各一镜）。
 - 自动填：镜号、场景、光照、在场角色、道具、景别（按人数/类型推断）、机位（默认"固定机位"）、时长（继承剧本模型）、生成批次（同场景+光照归一批）。
+  光照优先级：**剧本该场指定的光照 > 美术场景第一个状态 > 默认**——剧本改光照，分镜跟着走；
+  剧本没写，才回退美术的默认状态。
 - `--autofill`：把场景光照 + 角色形象 + 道具状态 + 景别 + 风格拼成英文首帧提示词；同时为每条镜头合成 **H3 三段式视频提示词**（`integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`），直接可喂给 MiniMax H3。
 - `--prompt-format h3|legacy`（默认 `h3`）：`h3` 生成 H3 视频提示词；`legacy` 只生成首帧图像提示词（不含 `h3` 字段，质量门退化为 13+G17 道）。
 - `--h3-mode i2va|t2va`（默认 `i2va`）：`i2va`=首帧图+角色参考图驱动（图生视频，可反复抽卡，适合你的 ComfyUI 工作流）；`t2va`=纯文生视频。

@@ -1,0 +1,23 @@
+{
+  "projectId": "dukou-001",
+  "title": "渡口",
+  "genre": "民国情感悬疑",
+  "lang": "zh",
+  "episodes": 6,
+  "episodeMinutes": 2,
+  "source": "../../novel-characters/examples/渡口.txt",
+  "paths": {
+    "cast": "../../novel-characters/examples/渡口-cast.json",
+    "outline": "../../novel-outline/examples/渡口-outline.json",
+    "art": "../../novel-art/examples/渡口-art.json",
+    "script": "../../novel-script/examples/渡口-script.json",
+    "storyboard": "../../novel-storyboard/examples/渡口-storyboard.json"
+  },
+  "skills": {
+    "novel-characters": "pending",
+    "novel-outline": "pending",
+    "novel-art": "pending",
+    "novel-script": "pending",
+    "novel-storyboard": "pending"
+  }
+}

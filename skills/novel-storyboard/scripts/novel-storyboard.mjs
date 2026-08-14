@@ -147,6 +147,14 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
     return batchKey2Id.get(key);
   }
 
+  // 光照优先级：剧本该场指定（且美术已登记）> 美术场景第一个状态 > '默认'
+  function resolveLighting(sceneId, scriptLighting) {
+    const sm = ctx.sceneMap[sceneId];
+    if (!sm || !sm.lighting.length) return '默认';
+    if (scriptLighting && sm.lighting.some((l) => l.state === scriptLighting)) return scriptLighting;
+    return sm.lighting[0].state;
+  }
+
   for (const ep of script.episodes || []) {
     const shots = [];
     let shotSeq = 0;
@@ -184,7 +192,7 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
           shotId,
           ep: ep.ep,
           sceneId,
-          lighting: (ctx.sceneMap[sceneId] && ctx.sceneMap[sceneId].lighting[0] && ctx.sceneMap[sceneId].lighting[0].state) || '默认',
+          lighting: resolveLighting(sceneId, scene.lighting),
           characters: sceneChars.slice(),
           props: scene.props || [],
           shotType,
@@ -202,7 +210,7 @@ function deriveShotsFromScript(script, { ctx, autofill, params }) {
           splitPrompt: '',          // 纯文本首帧提示词（可直接复制进 Krea2 文生图/图生图）
           refImagePaths: [],        // 本镜引用的人物角色图路径（来自 cast.json，供 H3 I2VA 与首帧图生图复用）
           firstFrameCopyBlock: '',  // 可直接复制粘贴到 Krea2 ComfyUI 的首帧出图整块
-          batch: nextBatch(sceneId, (ctx.sceneMap[sceneId] && ctx.sceneMap[sceneId].lighting[0] && ctx.sceneMap[sceneId].lighting[0].state) || '默认'),
+          batch: nextBatch(sceneId, resolveLighting(sceneId, scene.lighting)),
           warnings: [],
           note: kind === 'vo' ? '心声/画外音：可不放说话人入画，仅给表情或空镜' : ''
         };

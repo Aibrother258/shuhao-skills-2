@@ -1,5 +1,32 @@
 # Changelog
 
+## novel-storyboard — 2026-08-14x：对齐上游数据模型 + 结构化 HTML 报告
+
+本地 `novel-storyboard` 此前偏离上游，用了 `episodes[].shots[]` 扁平镜数组 → 12 列大表
+（3.8MB、布局差），上游实为 `episodes[].segments[]→cuts[]` 段卡 + 节奏带模型（≤15s=一次
+生成调用）。本次整体对齐回上游：
+
+- **脚本整体替换**：`novel-storyboard.mjs` 用上游 `segments[]→cuts[]` 模型重写，校验门按
+  上游口径（节拍覆盖、段≤15s、台词秒数、frame 英文+Cinematic 风格短语、禁角色中文名、h3Prompt
+  含 `[Shot N]`+`<d>[中文]台词</d>` 逐字匹配）
+- **补齐 references**：新增 `frame.md` / `h3-prompt.md` / `storyboard-pass.md`，`schema.md`
+  换上游版；新增 `assets/report.webp` 报告样例图
+- **加回 `--per-ep`**：本地独有增强，复用 `renderHtml` 整页产物按 `<section class="ep">`
+  切片输出 `E{ep}.html` + `index.html`，无逻辑分叉
+- **selftest 对齐上游**：165 项全绿，全仓库 check 通过
+
+## novel-art — 2026-08-14h：photorealistic 预设自测同步 + 防御门
+
+上游同步（14g）带来的第三档画风 `photorealistic` 代码和文档都已就位，但 selftest 没跟上
+（断言还停在 `realistic,ghibli` 两档），导致 `check.mjs --run` 挂 novel-art。修复：
+
+- 校验新增防御门：`photorealistic` 预设的负向提示词也不许禁 `photorealistic`
+  （写实预设禁写实自相矛盾），与 `realistic` 同规则
+- selftest 同步：三档期望值 + photorealistic 不自禁/自带禁人断言 + 击穿用例；131 → **134 项**
+- README 风格门描述同步
+
+验证：novel-art 134 项全绿，全仓库 check.mjs --run 通过。
+
 ## 仓库 — 2026-08-14g：上游同步（eternityspring 新功能并入，本地成果不回退)
 
 用户要求把上游 `eternityspring/shuohao-skills` 的更新同步进来。经核对，上游相对本地主要是回退

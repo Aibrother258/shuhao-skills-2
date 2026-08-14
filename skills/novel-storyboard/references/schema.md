@@ -1,134 +1,70 @@
-# storyboard.json 数据结构
+# storyboard.json 结构
 
-分镜表是 `novel-script`(剧本) 的下游产物：把剧本的**每条 beat（动作节拍 / 台词行 / 心声）**拆成一条可生成的分镜（shot）。一个 beat ↔ 一条 shot，一一对应，保证剧本被完整覆盖。
+三层：**集 → 段（segment）→ 分镜（cut）**。
 
-## 顶层
+- **段** = 一次视频生成调用，总时长 ≤ `maxSegmentSeconds`（默认 15 秒），不跨场次——换景必开新段
+- **分镜** = 段内的一次剪切，`minCutSeconds`–`maxCutSeconds`（默认 2–5 秒），各自认领剧本节拍、带景别运镜和一张分镜图
+- **分镜图** = 每个分镜一张关键帧：第 1 切的是**主分镜图**（钉在 0.00 秒），其余是**子分镜图**（各钉在自己的切点时刻）。**每段一个文件夹**：`<段号>/f<切序>.png` + `prompt.md`（export 生成，内容就是 h3Prompt）
 
-```jsonc
+```json
 {
-  "source": "渡口",                 // 书名，用于产出文件名
-  "params": { ... },                // 可选：覆盖默认时长参数
-  "episodes": [ { "ep": 1, "targetSeconds": 120, "shots": [ ... ] } ],
-  "_embed": {                       // 仅记录来源，便于复跑
-    "script": "渡口-script.json",
-    "outline": "渡口-outline.json",
-    "art": "渡口-art.json",
-    "cast": "渡口-cast.json"
-  }
+  "source": "渡口",
+  "style": "realistic",
+  "promptLang": "zh",
+  "params": { "maxSegmentSeconds": 15, "minCutSeconds": 2, "maxCutSeconds": 5, "maxOnScreen": 3, "tolerance": 0.15 },
+  "episodes": [ { "ep": 1, "segments": [ ... ] } ]
 }
 ```
 
-### params（可覆盖，默认见下）
+`promptLang` 可省略（**默认 `en`——官方规范口径**）：整条英文、禁角色名，台词在 `<d>[Chinese]` 里保留原文。设成 `zh` 可切整条中文（对齐指令、字段名、镜头标记都有中文版，人名放行）——偏离官方推荐的备选项。`style` 可省略（默认 `realistic`），预设与角色/场景 skill 同名对齐（`realistic` / `ghibli`），对应的英文短语（如 `cinematic film still`）必须出现在**每条**分镜图提示词里——同一部剧的分镜图不许画风漂，门查。
 
-| 字段 | 默认 | 含义 |
+## segment（段）
+
+| 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `charsPerSecond` | 4.5 | 台词行语速（字/秒），用于估算台词镜头时长 |
-| `actionSeconds` | 2.5 | 单条动作节拍基础时长 |
-| `tolerance` | 0.15 | 单集预估时长相对剧本 `targetSeconds` 的容差（±15%） |
-| `shotSecondsFloor` | 1.5 | 单镜最短秒数 |
-| `shotSecondsCap` | 10 | 单镜最长秒数 |
-| `style` | "semi-realistic" | 美术风格，需与 `art.json` 对齐 |
-| `promptFormat` | "h3" | 提示词格式：`h3`=生成 H3 三段式视频提示词（MiniMax H3）；`legacy`=仅首帧图像提示词 |
-| `h3Mode` | "i2va" | H3 生成模式：`i2va`=首帧图+角色参考图驱动（图生视频，可反复抽卡）；`t2va`=纯文生视频 |
-| `h3Style` | "Live-action, cinematic" | H3 描述句首的主视觉风格 |
-| `h3Music` | "A soft, understated background score ..." | H3 `non_diegetic_music` 默认值 |
+| `id` | string | 段号 `E01-01`：集号 + 两位序号，**按顺序连号**。它就是素材文件名（`E01-01.mp4` / `E01-01-f1.png`） |
+| `sceneIndex` | int | 这一段在剧本该集的第几场（1 起）。段内全部分镜同场 |
+| `cuts` | cut[] | 段内分镜，按时间顺序。段总秒数 = 分镜秒数之和，**不单独存**——少一处会漂的冗余 |
+| `h3Prompt` | string | **一段一条 H3 视频提示词**，正文语言跟 `promptLang`（默认中文），结构见 `references/h3-prompt.md` |
+| `note` | string | 备注，可选 |
 
-## episode
+## cut（分镜）
 
-```jsonc
-{
-  "ep": 1,                 // 集号
-  "targetSeconds": 120,    // 本集预估总时长（自动汇总 shots.durationSec）
-  "shots": [ ... ]
-}
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `beats` | [int, int] | 认领该场第几拍到第几拍（含两端）。**每个节拍必须被恰好一个分镜认领**，按顺序、连续 |
+| `seconds` | number | 分镜时长，2–5 秒——短剧的注意力节奏是硬门。认领节拍的台词秒数必须装得下 |
+| `size` | enum | 景别：`extreme-wide` 大远景 / `wide` 全景 / `medium` 中景 / `close` 特写 / `extreme-close` 大特写 |
+| `camera` | enum | 运镜，**直接用 H3 官方词表**（原样字符串）：`Static Shot` `Push In` `Pull Out` `Zoom In/Out` `Pan Left/Right` `Truck Left/Right` `Tilt Up/Down` `Pedestal Up/Down` `Arc Shot` `Tracking Shot` `Shake Slightly/Strongly` `POV` `Roll Clockwise/Counterclockwise` |
+| `characters` | string[] | 画内人物（C 编号），必须 ⊆ 剧本该场人物；空镜给空数组。> `maxOnScreen` 时必须带 `note` |
+| `props` | string[] | 画内道具（P 编号），必须 ⊆ 剧本该场道具。可省略 |
+| `frame` | string | **分镜图英文提示词**：这一格关键帧的样子。景别英文短语必须在里面；禁角色名 |
+| `note` | string | 备注，可选 |
+
+## h3Prompt 的结构（三道门盯着，两处逐字对账）
+
+写法见 `references/h3-prompt.md`（官方方法论的内化版，本 skill 自包含不依赖外部 skill）。骨架：
+
+```text
+How the reference pictures align with the target video — Picture 1 (from Shot 1) aligns with the 0.00-second mark of the target video; Picture 2 (from Shot 2) aligns with the 3.00-second mark of the target video; ….
+
+integrated_multimodal_description:
+[Shot 1] Cinematic, live-action, …（首格锚定 → 动作 → 运镜 → 对白）
+[Shot 2] At 00:03.000, the camera cuts to …（每个镜头独立一行，切点时刻开头）
+
+overall_soundscape: …（环境声与动作声，1–4 句）
+
+non_diegetic_music: …（1–3 句，没有就 N/A）
 ```
 
-## shot（核心字段）
+确定性检查的五条：
 
-| 字段 | 来源 | 含义 |
-| --- | --- | --- |
-| `shotId` | 脚本生成 | 镜号，格式 `E{nn}S{nnn}`（如 `E01S001`） |
-| `ep` | 脚本生成 | 所属集号 |
-| `sceneId` | 剧本 | 场景 ID，**须在 `art.json` 的 `scenes[].id` 内** |
-| `lighting` | 剧本/art | 光照状态名，**须是 `art.json` 该场景 `lighting[].state` 之一** |
-| `characters` | 剧本 | 在场角色 ID 数组，**须 ⊆ 剧本该场 `characters`** |
-| `props` | 剧本 | 道具 ID 数组（对应 `art.json` 的 `props[].id`） |
-| `shotType` | 模型填（seed 给默认） | 景别，枚举见下 |
-| `camera` | 模型填（seed 默认"固定机位"） | 机位/运动：固定/推/拉/摇/移/跟/手持 |
-| `durationSec` | 脚本生成 | 单镜时长（秒），继承剧本 beat 时长模型 |
-| `sourceBeat` | 脚本生成 | `{ sceneNo, beatNo }`，回溯到剧本的具体 beat |
-| `beatKind` | 脚本生成 | `action` / `dialogue` / `vo` |
-| `onScreen` | 脚本生成 | `vo` 默认 `false`（心声可不把说话人放进画面） |
-| `prompt` | **模型填**（autofill 可自动合成） | 首帧生成提示词，**必须英文**（图生视频 I2VA/FL2VA 的首帧或 T2V 底图） |
-| `splitPrompt` | autofill 生成 | 纯文本首帧提示词（单行），**可直接复制进 Krea2 ComfyUI 文生图/图生图节点** |
-| `negativePrompt` | **模型填**（autofill 可自动合成） | 反向提示词，**必须英文** |
-| `refImagePaths` | autofill 生成 | 本镜引用的人物角色图路径清单，**按景别推荐取用**：特写→`portrait`／近景·过肩→`portrait`(或`halfBody`)／中景→`halfBody`／全景·远景→`fullBody`／侧身→`side`。所选缺失时自动降级 `portrait → sheet → 【角色图:名】` 占位（`cast.json` 的多视角字段可选，skill 只管推荐+降级，生成图是你自己的事）。供首帧图生图与 H3 I2VA 复用 |
-| `complexity` | autofill 生成（P0） | 镜头复杂度评分：`{ score, level: 'simple'\|'normal'\|'high', recommendSplit: bool, splitClauses: string[], warnings: string[] }`。`score` 为确定性打分（人数/互动、动作分句数、道具交互、情绪变化、镜头运动、空间位移），仅用于展示镜头繁忙程度；**`recommendSplit` 与拆镜器共用同一把尺子**：仅当「动作镜 + ≥2 个句号/分号分句」时置 `true`，保证"推荐可拆"必然"拆得动"（`split --auto` 据此拆分，同样只拆动作镜、只按句号分句）。逗号串成的连续动作（如"拿起手机，看了一眼消息"）不计入可拆分句，由 `warnings` 提示人工处理，避免"提示了却拆不动" |
-| `continuity` | autofill 注入骨架（P0-3） | 连续性状态块：`{ characters: {cid:{name,wardrobe,emotion,state,position}}, props:{pid:{name,state}}, scene:{lighting,weather,time} }`。`wardrobe` 为服装 ID（如 `W01`），与 `cast.json` 的 `wardrobe` 表共用同一份 ID——既用于连续性检查，也由 `composePrompt` 展开成 `wearing <prompt>` 注入首帧。`identityAnchors` 不可变特征由 `composePrompt` 注入首帧（Identity Lock），防跨镜脸崩。缺省留空待模型 seed 后精修 |
-| `direction` | autofill 注入骨架（Iteration 5） | 视觉导演块（Visual Direction）：`{ framing, cameraAngle, lens, subjectPriority[], composition, foreground, midground, background, visualFocus, pose, emotion, colorMood }`。seed 用确定性逻辑填骨架（`framing←shotType`、`cameraAngle` 默认 eye-level、`lens` 特写 85mm/其他 35mm、`subjectPriority←`角色顺序、`visualFocus←`动作主语、`emotion`/`pose` 由动作词表推断、`colorMood←`光照天气），`composePrompt` 在 `direction` 存在时追加构图/镜头/焦点/情绪/色调句，让首帧从"拼接"升级为"导演"。`foreground/midground/background` 可空待模型精修；无 `direction`（旧 storyboard.json）时 `composePrompt` 行为不变（向后兼容） |
-| `firstFrameCopyBlock` | autofill 生成 | **首帧出图整块**：正向提示词 + 反向提示词 + 参考图，分块标注，**可直接复制粘贴到 Krea2 ComfyUI 工作流** |
-| `h3` | autofill 生成（仅 `promptFormat=h3`） | H3 视频提示词三段式（见下），`mode` 为 `I2VA`/`T2VA`；I2VA 额外带 `firstFrameReference`/`characterReference` |
-| `h3CopyBlock` | autofill 生成（仅 `promptFormat=h3`） | **视频生成整块**：首帧引用句(I2VA) + 三段式字段，分块标注，**可直接复制粘贴到 MiniMax H3 ComfyUI 工作流** |
-| `batch` | 脚本生成 | 生成批次（同 `场景+光照` 归一批，如 `B1`） |
-| `warnings` | 模型填 | 难点预警数组（多人近景/特写、含人群词等） |
-| `note` | 模型填 | 取景/调度备注（`vo` 镜必须说明） |
+1. **首行对齐指令整行由分镜结构按 `promptLang` 推导**（`h3AlignmentLine`）：多分镜的段把每张分镜图钉在自己的切点秒数上；单分镜的段用固定句式。validate **逐字对账**——分镜秒数一改，旧指令立刻对不上
+2. 三个字段名齐全且按序；描述正文有 `[Shot 1]`
+3. **每个 `[Shot k]`（k ≥ 2）必须带切点时刻 `At 00:0X.XXX,`，且等于前面分镜秒数的累计**——节奏写在纸上就必须和提示词一致
+4. 认领节拍的每句台词**逐字**进 `<d>[Chinese] …</d>`；说话人身份音色语气用英文写在 `<d>` 外；画外音用 `says in an off-screen voiceover` 并注明唇形闭合
+5. `<d>` 块之外的正文语言与 `promptLang` 一致（中文写成英文、英文混进中文都拦）；英文模式禁角色名，中文模式放行（身份靠分镜图锚定）；每个分镜的运镜词（中文用词表中文词如「推」「固定」，英文用官方词）必须出现在**自己的 [Shot k] 段落**里
 
-### shotType 枚举
+## 时长约束链
 
-`全景` `远景` `中景` `近景` `特写` `过肩` `主观` `空镜`
-
-### seed 默认景别推断（模型可覆盖）
-
-- 动作节拍：在场 ≥3 人→`全景`，2 人→`中景`，1 人→`近景`
-- 台词行：≥3 人→`中景`，2 人→`过肩`，1 人→`近景`
-- 心声(vo)：`特写`
-
-## 与上游的契约
-
-| 上游 skill | 文件 | 分镜消费它的什么 |
-| --- | --- | --- |
-| novel-script | `script.json` | 每集每场 `flow` 的 beat → 拆镜；`targetSeconds` 用于单集时长对账；`characters` 用于角色一致性 |
-| novel-art | `art.json` | `scenes[].id` / `lighting[].state` 校验场景与光照；`image.negativePrompt`、`props[].states[].prompt` 供 autofill 合成提示词 |
-| novel-characters | `cast.json` | `characters[].name` ↔ outline 的 `C-id` 映射；`image.prompt` 供 autofill 合成角色形象 |
-| novel-outline | `outline.json` | `characters[].id → name` 映射，把 `C01` 变成"沈知微"显示在报告里 |
-
-> 不提供上游文件时，对应的对账类质量门自动"跳过"，其余门仍强制通过。
-
-## 质量门（17 道，确定性）
-
-1. **剧本 beat 全覆盖**：每个剧本 beat 都有对应 shot（需 `--script`）
-2. **shotId 唯一且格式合规**：`^E\d{2,}S\d{3,}$`
-3. **场景 ID 在 art.json 存在**（需 `--art`）
-4. **光照状态在场景内注册**（需 `--art`）
-5. **镜头角色 ⊆ 剧本在场角色**（需 `--script`）
-6. **单镜时长合规 & 单集时长贴近**：单镜 ∈ [floor,cap]，单集总和贴近剧本 `targetSeconds`±容差（单集比对需 `--script`）
-7. **景别取值合法**
-8. **机位非空**
-9. **首帧提示词非空且英文**（若 `--cast` 还校验不含角色中文名）
-10. **反向提示词非空且英文**
-11. **生成批次已分配**
-12. **VO 镜头取景已说明**：`onScreen=false` 或 `note` 非空
-13. **难点镜头已加预警**：≥3 人在场且景别为近景/特写、或提示词含人群词，须在 `warnings` 标注
-14. **H3 描述符合规范**（仅 `promptFormat=h3`）：每条 `h3.integrated_multimodal_description` 非空、含 `[Shot N]` 头、含运镜(`The camera`)与景别词(`shot`/`frames`)、对白/心声镜含 `<d>[`；H3 允许中文（角色名/`<d>[Chinese]` 台词），但**动作叙事须为英文**（含中文动作自动退化占位）
-15. **H3 声景/配乐已填**（仅 `promptFormat=h3`）：`h3.overall_soundscape` 与 `h3.non_diegetic_music` 均非空
-16. **H3 复制块已生成**（仅 `promptFormat=h3`）：每条 `h3CopyBlock` 非空，可直接粘贴到 ComfyUI
-17. **首帧出图复制块已生成**：每条 `firstFrameCopyBlock` 非空，可直接粘贴到 Krea2 ComfyUI
-
-> `promptFormat=legacy` 时，G14/G15/G16 自动标记为"未生成 H3，跳过"，仅跑前 13 + G17 道。
-
-## ComfyUI 工作流对接（端到端）
-
-本 skill 的产出直接服务于你描述的两条 ComfyUI 链路，**全部字段开箱即可复制粘贴**：
-
-### 链路 A · 首帧图（Krea2 ComfyUI）
-- 输入：`firstFrameCopyBlock`（正向+反向提示词） + `refImagePaths`（人物角色图，作为图生图/角色一致性参考）。
-- 操作：把"正向提示词"粘进 Krea2 文生图/图生图节点；把角色图作为参考图传入；"反向提示词"粘进 negative 节点。
-- 产出：每条镜头一张首帧图（文件名建议 `E01S001.png`，与 `shotId` 对应）。
-
-### 链路 B · 视频（MiniMax H3 ComfyUI）
-- 输入：`h3CopyBlock`（首帧引用句 + 三段式） + 链路 A 的首帧图 + `refImagePaths`（人物角色图）。
-- 操作：`h3Mode=i2va` 时，把"首帧引用句"粘到提示词开头，把首帧图作为 `<Picture 1>` 传入，把角色图作为参考图；其余三段（`integrated_multimodal_description` / `overall_soundscape` / `non_diegetic_music`）分别粘入对应字段。
-- 抽卡：对同一 `shotId` 反复换随机种子/微调提示词，直到画面与角色一致、运镜满意，再进下一镜。
-
-> `refImagePaths` 的真实路径优先在 `cast.json` 的 `image.portrait` 填入（干净单视角参考图，专供生成参考）；其次 `image.path`；缺省时退化为 `【角色图:名】` 占位，`novel-project verify` 会报"参考图文件缺失"提醒补图。
-
+台词秒数（按剧本语速折算）≤ 分镜 `seconds` ≤ 5 秒；段 Σ分镜 ≤ 15 秒；集 Σ段 落在剧本 `targetSeconds` ±15%。全部由 validate 逐级对账。

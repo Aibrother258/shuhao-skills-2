@@ -36,7 +36,7 @@
 | 提示词语言 | 全部英文 |
 | 提示词不含角色名 | `validate --cast cast.json` 才查；不给就**明说跳过** |
 | 变体引用完整 | `variantOf` 指向存在的场景且带 `changes` |
-| 风格与反向词匹配 | `realistic` 不禁 photorealistic、`ghibli` 必须禁 |
+| 风格与反向词匹配 | `realistic` / `photorealistic` 不禁 photorealistic、`ghibli` 必须禁 |
 | **道具状态** | ≥1 且落成英文提示词 |
 | **道具尺度** | scale 枚举对应的英文短语必须出现在提示词里 |
 | **道具无手** | 反向提示词禁 hands/fingers |

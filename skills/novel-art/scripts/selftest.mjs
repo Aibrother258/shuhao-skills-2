@@ -47,13 +47,21 @@ const gate = (d, id, names = null) => gateReport(d, names).find((g) => g.id === 
 /* ---------------- 画风预设 ---------------- */
 
 eq(DEFAULT_STYLE, 'realistic', '默认半写实');
-eq(SUPPORTED_STYLES.join(','), 'realistic,ghibli', '两档画风与 novel-characters 同名对齐');
+eq(SUPPORTED_STYLES.join(','), 'realistic,ghibli,photorealistic', '三档画风与 novel-characters 同名对齐');
 ok(!/photorealistic/.test(SCENE_STYLE_PRESETS.realistic.negative), 'realistic 不禁 photorealistic');
 ok(/photorealistic/.test(SCENE_STYLE_PRESETS.ghibli.negative), 'ghibli 必须禁 photorealistic');
+ok(!/photorealistic/.test(SCENE_STYLE_PRESETS.photorealistic.negative), 'photorealistic 也不禁自身（写实预设禁写实是自相矛盾）');
 ok(/people/.test(SCENE_STYLE_PRESETS.realistic.negative), 'realistic 预设自带禁人');
 ok(/people/.test(SCENE_STYLE_PRESETS.ghibli.negative), 'ghibli 预设自带禁人');
+ok(/people/.test(SCENE_STYLE_PRESETS.photorealistic.negative), 'photorealistic 预设自带禁人');
 ok(!/pore|skin|subsurface/i.test(SCENE_STYLE_PRESETS.realistic.surface), '环境预设不带皮肤毛孔那套——那是角色的');
 eq(scenePreset('nope'), SCENE_STYLE_PRESETS.realistic, '未知风格退回默认');
+ok(validateArt({ source: 'x', style: 'photorealistic', scenes: [{
+  id: 'S01', name: '屋',
+  image: { prompt: 'empty room', negativePrompt: 'people, photorealistic, text' },
+  lighting: [{ state: '晨', prompt: 'soft light' }],
+  anchors: [{ name: 'a', desc: 'b' }, { name: 'c', desc: 'd' }, { name: 'e', desc: 'f' }],
+}] }).some((x) => x.includes('禁了 photorealistic')), 'photorealistic 预设的负向禁自身被拦');
 
 /* ---------------- slug ---------------- */
 

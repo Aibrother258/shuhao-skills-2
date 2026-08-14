@@ -201,6 +201,7 @@ export function gateReport(doc, castNames = null) {
     const bansRealism = /photorealistic|3d render/i.test(neg);
     if (style === 'realistic' && bansRealism) bad.style.push(`${label} 禁了 photorealistic`);
     if (style === 'ghibli' && !bansRealism) bad.style.push(`${label} 没禁 photorealistic`);
+    if (style === 'photorealistic' && bansRealism) bad.style.push(`${label} 禁了 photorealistic（本身就是写实预设）`);
     if (thText(s?.image?.sheet) && !s.image.sheet.includes(preset.render)) bad.style.push(`${label} 的 sheet 缺渲染句`);
   }
 

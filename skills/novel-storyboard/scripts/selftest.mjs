@@ -1,308 +1,485 @@
 #!/usr/bin/env node
-'use strict';
-// novel-storyboard 自测：确定性击穿质量门 + 端到端跑通《渡口》样例
-// 约定：全部通过 exit 0；任一断言失败 exit 1。零依赖。
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, dirname, resolve } from 'node:path';
+// novel-storyboard 自测：不调模型、不花额度，只验确定性逻辑。
+// 原则与仓库里其他 skill 一致：每道质量门都要有击穿用例——
+// 证明它真的会拦，不是一个永远为真的假测试。
+
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  CAMERA_MOVES,
+  DEFAULT_PARAMS,
+  DEFAULT_STYLE,
+  STYLE_PRESETS,
+  exportPack,
+  H3_I2VA_LINE,
+  SHOT_SIZES,
+  computeStats,
+  cutStarts,
+  expandScript,
+  gateReport,
+  h3AlignmentLine,
+  h3CutSlices,
+  h3CutTime,
+  h3Remainder,
+  paramsOf,
+  renderHtml,
+  renderMarkdown,
+  seedFromScript,
+  segSeconds,
+  slug,
+  validateStoryboard,
+} from './novel-storyboard.mjs';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const ROOT = resolve(__dirname, '..');
-const EX = join(ROOT, 'examples');
-const SCRIPT = join(__dirname, 'novel-storyboard.mjs');
+const here = dirname(fileURLToPath(import.meta.url));
+const FIXTURE = JSON.parse(readFileSync(join(here, '../examples/渡口-storyboard.json'), 'utf8'));
+const SCRIPT = JSON.parse(readFileSync(join(here, '../../novel-script/examples/渡口-script.json'), 'utf8'));
+const OUTLINE = JSON.parse(readFileSync(join(here, '../../novel-outline/examples/渡口-outline.json'), 'utf8'));
+const CAST = JSON.parse(readFileSync(join(here, '../../novel-characters/examples/渡口-cast.json'), 'utf8'));
+const ART = JSON.parse(readFileSync(join(here, '../../novel-art/examples/渡口-art.json'), 'utf8'));
+const CTX = { script: SCRIPT, outline: OUTLINE, cast: CAST, art: ART };
 
-let pass = 0, fail = 0;
-function ok(name, cond, extra) {
-  if (cond) { pass++; console.log(`  PASS  ${name}`); }
-  else { fail++; console.log(`  FAIL  ${name}${extra ? ' — ' + extra : ''}`); }
+let passed = 0;
+function ok(cond, label) {
+  assert.ok(cond, label);
+  passed += 1;
 }
-function run(args, cwd) {
-  const r = spawnSync(process.execPath, [SCRIPT, ...args], { cwd: cwd || ROOT, encoding: 'utf8' });
-  return { code: r.status, out: (r.stdout || '') + (r.stderr || ''), raw: r };
+function eq(actual, expected, label) {
+  assert.equal(actual, expected, `${label} — 期望 ${expected}，实际 ${actual}`);
+  passed += 1;
 }
+const clone = (x) => structuredClone(x);
+const gate = (doc, id, ctx = CTX) => gateReport(doc, ctx).find((g) => g.id === id);
 
-// ── 1. 端到端：用《渡口》上游四件套 seed --autofill → validate 13/13 ──
-console.log('[1] 端到端《渡口》样例：seed --autofill + validate');
+/* ---------------- expandScript ---------------- */
+
+const expanded = expandScript(SCRIPT);
+eq(expanded.size, 6, '剧本六集全部展开');
+const e1 = expanded.get(1);
+eq(e1.scenes.length, 2, '第 1 集两场');
+eq(e1.scenes[0].beats.length, 13, '第 1 场 13 拍');
+eq(e1.scenes[1].beats.length, 22, '第 2 场 22 拍');
+eq(e1.scenes[0].beats[0].kind, 'action', '第 1 拍是动作');
+eq(e1.scenes[0].beats[0].seconds, 2.5, '动作按 2.5 秒计');
+eq(e1.scenes[0].beats[2].speaker, 'C03', '台词带说话人');
+eq(e1.targetSeconds, 120, '目标秒数带出来');
+eq(expandScript(null).size, 0, '空剧本不崩');
+
+/* ---------------- H3 骨架推导 ---------------- */
+
+eq(h3CutTime(3), '00:03.000', '切点时刻格式 分:秒.毫秒');
+eq(h3CutTime(6.5), '00:06.500', '半秒切点');
+eq(h3CutTime(65), '01:05.000', '过分钟进位');
+eq(cutStarts([{ seconds: 3 }, { seconds: 4 }, { seconds: 3 }]).join(','), '0,3,7', '切点 = 前面分镜秒数累计');
+eq(h3AlignmentLine([{ seconds: 5 }]), H3_I2VA_LINE, '默认英文：单分镜的段用官方 I2VA 固定句式');
+eq(h3AlignmentLine([{ seconds: 5 }], 'zh'), '目标视频在 0.00 秒处完全参照图 1（来自镜头 1）。', 'zh 模式有中文 I2VA 句式');
 {
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const seed = run(['seed', join(EX, '渡口-script.json'),
-    '--outline', join(EX, '渡口-outline.json'),
-    '--art', join(EX, '渡口-art.json'),
-    '--cast', join(EX, '渡口-cast.json'),
-    '--autofill', '--out', join(tmp, '渡口-storyboard.json')], tmp);
-  ok('seed 退出码 0', seed.code === 0, seed.out.slice(-300));
-  const v = run(['validate', join(tmp, '渡口-storyboard.json'),
-    '--script', join(EX, '渡口-script.json'),
-    '--outline', join(EX, '渡口-outline.json'),
-    '--art', join(EX, '渡口-art.json'),
-    '--cast', join(EX, '渡口-cast.json')], tmp);
-  ok('validate 退出码 0', v.code === 0, v.out.slice(-300));
-  ok('validate 通过 17/17（H3 默认 i2va）', /通过 17\/17/.test(v.out), v.out.slice(-200));
-  // 确认每条镜头都带 H3 三段式提示词 + 两个可直接复制块 + 首帧块
-  const sb = JSON.parse(readFileSync(join(tmp, '渡口-storyboard.json'), 'utf8'));
-  const allH3 = sb.episodes.every(e => e.shots.every(s => s.h3 && s.h3.integrated_multimodal_description && s.h3.overall_soundscape && s.h3.non_diegetic_music));
-  ok('每条镜头都带 H3 三段式提示词', allH3);
-  const allCopy = sb.episodes.every(e => e.shots.every(s => s.h3CopyBlock && s.firstFrameCopyBlock));
-  ok('每条镜头都带 H3/首帧 可直接复制块', allCopy);
-  const dia = sb.episodes[0].shots.find(s => s.beatKind === 'dialogue' || s.beatKind === 'vo');
-  ok('对白/心声镜 H3 含 <d>[ 台词封装', dia ? dia.h3.integrated_multimodal_description.includes('<d>[') : true);
+  const line = h3AlignmentLine([{ seconds: 3 }, { seconds: 4 }]);
+  ok(line.startsWith('How the reference pictures align with the target video — '), '默认英文：多分镜用官方对齐句式');
+  ok(line.includes('Picture 1 (from Shot 1) aligns with the 0.00-second mark'), '主分镜图钉 0.00 秒');
+  ok(line.includes('Picture 2 (from Shot 2) aligns with the 3.00-second mark'), '子分镜图钉自己的切点');
+  ok(h3AlignmentLine([{ seconds: 3 }, { seconds: 4 }], 'zh').includes('图 2（来自镜头 2）对齐目标视频 3.00 秒处'), 'zh 模式对齐句式可用');
 }
-
-// ── 1b. seed --prompt-format legacy 应退化为 13+G17 道 ──
-console.log('[1b] seed --prompt-format legacy → 含首帧块、不含 h3');
 {
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const seed = run(['seed', join(EX, '渡口-script.json'),
-    '--outline', join(EX, '渡口-outline.json'),
-    '--art', join(EX, '渡口-art.json'),
-    '--cast', join(EX, '渡口-cast.json'),
-    '--autofill', '--prompt-format', 'legacy', '--out', join(tmp, 'legacy.json')], tmp);
-  ok('legacy seed 退出码 0', seed.code === 0, seed.out.slice(-300));
-  const v = run(['validate', join(tmp, 'legacy.json'),
-    '--script', join(EX, '渡口-script.json'),
-    '--outline', join(EX, '渡口-outline.json'),
-    '--art', join(EX, '渡口-art.json'),
-    '--cast', join(EX, '渡口-cast.json')], tmp);
-  ok('legacy validate 全过且 H3 门跳过', /全部质量门通过/.test(v.out) && /未生成 H3 提示词（legacy 模式），跳过/.test(v.out), v.out.slice(-200));
-  const sb = JSON.parse(readFileSync(join(tmp, 'legacy.json'), 'utf8'));
-  ok('legacy 模式镜头不含 h3 字段', sb.episodes.every(e => e.shots.every(s => !s.h3)));
+  const slices = h3CutSlices('integrated_multimodal_description:\n[Shot 1] aa\n[Shot 2] bb\n\noverall_soundscape: x', 2);
+  ok(slices[0].includes('aa') && !slices[0].includes('bb'), '[Shot k] 切片互不越界');
+  ok(slices[1].includes('bb') && !slices[1].includes('x'), '切片不吃到声景字段');
+  const zh = h3CutSlices('整体视听描述：\n[镜头 1] aa\n[镜头 2] bb\n\n整体音景：x', 2, 'zh');
+  ok(zh[0].includes('aa') && zh[1].includes('bb'), 'zh 模式按 [镜头 k] 切片');
 }
+eq(segSeconds({ cuts: [{ seconds: 3 }, { seconds: 4.5 }] }), 7.5, '段秒数 = 分镜求和');
 
-// ── 1c. 击穿：H3 描述缺 [Shot 头必须 FAIL（G14）──
-console.log('[1c] 击穿用例：H3 描述缺 [Shot 头 → G14 FAIL');
+/* ---------------- computeStats ---------------- */
+
+const stats = computeStats(FIXTURE, SCRIPT);
+eq(stats.totals.segments, 10, '样例十段');
+eq(stats.totals.cuts, 34, '样例三十四个分镜');
+eq(stats.totals.seconds, 119, '总秒数');
+eq(stats.totals.targetSeconds, 120, '目标秒数');
+ok(stats.totals.avgCutSeconds >= 3 && stats.totals.avgCutSeconds <= 4, '平均一切 3 秒左右——短剧节奏');
+eq(stats.batches.length, 2, '两个生成批次（S02 浓雾清晨 / S01 晨雾）');
+ok(stats.batches[0].segments.length + stats.batches[1].segments.length === 10, '批次覆盖全部段');
+eq(stats.dialogue.length, 19, '第 1 集 19 句台词全部对到段和切');
+ok(stats.dialogue.every((d) => /^E01-\d{2}$/.test(d.segment) && d.cut >= 1), '对齐单带段号和切序');
+eq(stats.episodes[0].withLines, 10, '台词段计数——本样例每段都带台词，纯画面收在分镜级');
+eq(paramsOf({}).maxSegmentSeconds, DEFAULT_PARAMS.maxSegmentSeconds, '默认段上限 15 秒');
+eq(paramsOf({}).maxCutSeconds, 5, '默认分镜上限 5 秒');
+eq(paramsOf({ params: { maxCutSeconds: 4 } }).maxCutSeconds, 4, '分镜上限可调');
+
+/* ---------------- 质量门：全绿基线 ---------------- */
+
+ok(gateReport(FIXTURE, CTX).every((g) => g.ok), '样例带全部上游全部门通过');
+eq(gateReport(FIXTURE, CTX).length, 16, '十六道门');
 {
-  const doc = {
-    source: '击穿-H3', params: { promptFormat: 'h3' },
-    episodes: [{ ep: 1, targetSeconds: 3, shots: [
-      { shotId: 'E01S001', ep: 1, sceneId: 'S01', lighting: '晨', characters: [], props: [],
-        shotType: '近景', camera: '固定机位', durationSec: 3, sourceBeat: { sceneNo: 1, beatNo: 1 },
-        beatKind: 'action', onScreen: true, prompt: 'a calm pier in morning fog',
-        negativePrompt: 'crowd', batch: 'B1', warnings: [],
-        h3: { mode: 'T2VA', integrated_multimodal_description: 'a medium shot with no shot header', overall_soundscape: 'ambient', non_diegetic_music: 'soft score' } }
-    ] }]
-  };
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const p = join(tmp, 'badh3.json'); writeFileSync(p, JSON.stringify(doc, null, 2));
-  const v = run(['validate', p], tmp);
-  ok('H3 缺 [Shot → validate 退出码 1', v.code === 1, 'code=' + v.code);
-  ok('H3 缺 [Shot → 报 H3 描述 FAIL', /H3 描述/.test(v.out) && /FAIL/.test(v.out), v.out.slice(-200));
+  const gates = gateReport(FIXTURE, {});
+  ok(gates.every((g) => g.ok), '不带上游也通过（对账门跳过）');
+  ok(gates.find((g) => g.id === 'coverage').detail.includes('跳过'), '跳过要明说，不静默');
 }
 
-// ── 2. 构建最小合法分镜（不依赖上游）应通过无上游类质量门 ──
-console.log('[2] 最小合法分镜（无上游）应全过可判定门');
+/* ---------------- 质量门：逐门击穿 ---------------- */
+
+// coverage — 没人认领 / 重复认领 / 区间不合法 / 整场没分镜 / 顺序倒退
 {
-  const doc = {
-    source: '最小案例',
-    params: {},
-    episodes: [{
-      ep: 1, targetSeconds: 8,
-      shots: [
-        { shotId: 'E01S001', ep: 1, sceneId: 'S01', lighting: '晨', characters: ['C01'], props: [],
-          shotType: '近景', camera: '固定机位', durationSec: 3, sourceBeat: { sceneNo: 1, beatNo: 1 },
-          beatKind: 'dialogue', onScreen: true, prompt: 'a close-up of a young woman, soft light, cinematic',
-          negativePrompt: 'people, crowds, text', batch: 'B1', warnings: [], note: '',
-          firstFrameCopyBlock: '=== 正向提示词 ===\na close-up of a young woman, soft light, cinematic\n\n=== 反向提示词 ===\npeople, crowds, text' }
-      ]
-    }]
-  };
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const p = join(tmp, 'min.json'); writeFileSync(p, JSON.stringify(doc, null, 2));
-  const v = run(['validate', p], tmp);
-  ok('最小分镜 validate 退出码 0', v.code === 0, v.out.slice(-300));
-  ok('最小分镜未报 FAIL', !/FAIL/.test(v.out), v.out.slice(-200));
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[3].beats = [5, 5]; // 第 4 拍失去认领
+  const g = gate(doc, 'coverage');
+  ok(!g.ok, '有节拍没人认领被拦');
+  ok(g.detail.includes('没人认领'), '点名到拍');
 }
-
-// ── 3. 击穿：非法 shotId 必须被拦下（validate 退出码 1）──
-console.log('[3] 击穿用例：非法 shotId 必须 FAIL');
 {
-  const doc = {
-    source: '击穿', params: {},
-    episodes: [{ ep: 1, targetSeconds: 3, shots: [
-      { shotId: 'shot1', ep: 1, sceneId: 'S01', lighting: '晨', characters: [], props: [],
-        shotType: '近景', camera: '固定机位', durationSec: 3, sourceBeat: { sceneNo: 1, beatNo: 1 },
-        beatKind: 'action', onScreen: true, prompt: 'empty scene, fog', negativePrompt: 'crowd', batch: 'B1', warnings: [] }
-    ] }]
-  };
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const p = join(tmp, 'bad.json'); writeFileSync(p, JSON.stringify(doc, null, 2));
-  const v = run(['validate', p], tmp);
-  ok('非法 shotId → validate 退出码 1', v.code === 1, 'code=' + v.code);
-  ok('非法 shotId → 报 shotId 门 FAIL', /shotId/.test(v.out) && /FAIL/.test(v.out), v.out.slice(-200));
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[3].beats = [3, 5]; // 第 3 拍被两切认领
+  ok(gate(doc, 'coverage').detail.includes('重复认领'), '重复认领点得出切号');
 }
-
-// ── 4. 击穿：中文首帧提示词必须被拦下 ──
-console.log('[4] 击穿用例：中文首帧提示词必须 FAIL');
 {
-  const doc = {
-    source: '击穿2', params: {},
-    episodes: [{ ep: 1, targetSeconds: 3, shots: [
-      { shotId: 'E01S001', ep: 1, sceneId: 'S01', lighting: '晨', characters: [], props: [],
-        shotType: '近景', camera: '固定机位', durationSec: 3, sourceBeat: { sceneNo: 1, beatNo: 1 },
-        beatKind: 'action', onScreen: true, prompt: '这是一句中文提示词', negativePrompt: 'crowd', batch: 'B1', warnings: [] }
-    ] }]
-  };
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const p = join(tmp, 'bad2.json'); writeFileSync(p, JSON.stringify(doc, null, 2));
-  const v = run(['validate', p], tmp);
-  ok('中文提示词 → validate 退出码 1', v.code === 1, 'code=' + v.code);
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].beats = [1, 99];
+  ok(!gate(doc, 'coverage').ok, '节拍区间越界被拦');
 }
-
-// ── 5. 击穿：多人近景缺预警必须 FAIL ──
-console.log('[5] 击穿用例：3 人近景缺预警必须 FAIL');
 {
-  const doc = {
-    source: '击穿3', params: {},
-    episodes: [{ ep: 1, targetSeconds: 3, shots: [
-      { shotId: 'E01S001', ep: 1, sceneId: 'S01', lighting: '晨', characters: ['C01','C02','C03'], props: [],
-        shotType: '近景', camera: '固定机位', durationSec: 3, sourceBeat: { sceneNo: 1, beatNo: 1 },
-        beatKind: 'action', onScreen: true, prompt: 'three people in a small boat cabin, wide', negativePrompt: 'crowd', batch: 'B1', warnings: [] }
-    ] }]
-  };
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const p = join(tmp, 'bad3.json'); writeFileSync(p, JSON.stringify(doc, null, 2));
-  const v = run(['validate', p], tmp);
-  ok('3人近景缺预警 → validate 退出码 1', v.code === 1, 'code=' + v.code);
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments = doc.episodes[0].segments.filter((s) => s.sceneIndex !== 1);
+  ok(gate(doc, 'coverage').detail.includes('整场没有分镜'), '整场空白被拦');
 }
-
-// ── 6. render 产出 MD 与 HTML ──
-console.log('[6] render 产出 MD / HTML');
 {
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const src = join(tmp, 's.json');
-  writeFileSync(src, JSON.stringify({
-    source: '渲染', params: {},
-    episodes: [{ ep: 1, targetSeconds: 3, shots: [
-      { shotId: 'E01S001', ep: 1, sceneId: 'S01', lighting: '晨', characters: [], props: [],
-        shotType: '全景', camera: '固定机位', durationSec: 3, sourceBeat: { sceneNo: 1, beatNo: 1 },
-        beatKind: 'action', onScreen: true, prompt: 'empty pier in fog', negativePrompt: 'crowd', batch: 'B1', warnings: [] }
-    ] }]
-  }, null, 2));
-  const md = run(['render', src, '--md'], tmp);
-  const html = run(['render', src, '--html'], tmp);
-  ok('render --md 退出 0', md.code === 0);
-  ok('render --html 退出 0', html.code === 0);
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[1].sceneIndex = 2; // E01-03 变成场次倒退
+  ok(!gate(doc, 'coverage').ok, '场次顺序穿插被拦');
 }
-
-// ── 7. 复杂度评分：简单镜 score 低、多动作复杂镜 recommendSplit=true ──
-console.log('[7] 复杂度评分 determinism');
+// segment-cap
 {
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  // 构造最小 script：一个简单动作 beat + 一个复杂动作 beat
-  const script = {
-    source: '复杂度', episodes: [{ ep: 1, targetSeconds: 30, scenes: [
-      { sceneId: 'S01', lighting: '晨', characters: ['C01', 'C02'], props: ['P01'], flow: [
-        { action: '他站着' },
-        { action: '他走向窗前。拿起手机。看了一眼消息。脸色骤变。随后转身离开' },
-        { action: '他走向窗前，拿起手机，看了一眼消息，脸色骤变，随后转身离开' },
-        { action: '浓雾把栈桥吃得只剩三步远。梆子声从岸上飘过来' }
-      ] }
-    ] }]
-  };
-  const sp = join(tmp, 'cplx-script.json'); writeFileSync(sp, JSON.stringify(script, null, 2));
-  const seed = run(['seed', sp, '--outline', join(EX, '渡口-outline.json'), '--art', join(EX, '渡口-art.json'),
-    '--cast', join(EX, '渡口-cast.json'), '--autofill', '--out', join(tmp, 'cplx.json')], tmp);
-  ok('seed 退出 0', seed.code === 0, seed.out.slice(-200));
-  const board = JSON.parse(readFileSync(join(tmp, 'cplx.json'), 'utf8'));
-  const shots = board.episodes[0].shots;
-  const simple = shots.find(s => s.action === '他站着');
-  const complex = shots.find(s => s.action.includes('他走向窗前。拿起手机'));
-  const commaRun = shots.find(s => s.action.includes('他走向窗前，拿起手机'));
-  ok('简单镜有 complexity 且 score<4 level=simple', simple && simple.complexity && simple.complexity.score < 4 && simple.complexity.level === 'simple', JSON.stringify(simple && simple.complexity));
-  // 方案 A：recommendSplit 与拆镜器对齐 —— 仅动作镜 + ≥2 句号分句才置 true
-  ok('句号分句复杂镜 recommendSplit=true 且 level=high', complex && complex.complexity && complex.complexity.recommendSplit === true && complex.complexity.level === 'high', JSON.stringify(complex && complex.complexity));
-  // 逗号串镜：评分仍高但 recommendSplit=false，且 warnings 提示人工处理（拆镜器拆不动）
-  ok('逗号串镜 recommendSplit=false（拆镜器无法拆）', commaRun && commaRun.complexity && commaRun.complexity.recommendSplit === false, JSON.stringify(commaRun && commaRun.complexity));
-  ok('逗号串镜 warnings 提示人工拆分', commaRun && Array.isArray(commaRun.warnings) && commaRun.warnings.some(w => /逗号串|人工/.test(w)), JSON.stringify(commaRun && commaRun.warnings));
-  // 方案 A 补强：简单建立镜（≥2 句号分句但 score 低）不推荐拆 —— 过滤掉"浓雾…。梆子声…"类微镜
-  const establish = shots.find(s => s.action.includes('浓雾把栈桥'));
-  ok('简单建立镜（2 分句但 score<6）recommendSplit=false', establish && establish.complexity && establish.complexity.recommendSplit === false, JSON.stringify(establish && establish.complexity));
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].seconds = 15; // 段总秒数 27
+  const g = gate(doc, 'segment-cap');
+  ok(!g.ok, '段超 15 秒被拦');
+  ok(g.detail.includes('E01-01'), '点名到段');
 }
-
-// ── 8. export 平铺 Prompt 包：shots 四类文件产出 ──
-console.log('[8] export 产出 prompts/ 平铺文件');
+// cut-length
 {
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const seed = run(['seed', join(EX, '渡口-script.json'),
-    '--outline', join(EX, '渡口-outline.json'), '--art', join(EX, '渡口-art.json'),
-    '--cast', join(EX, '渡口-cast.json'), '--autofill', '--out', join(tmp, '渡口-storyboard.json')], tmp);
-  ok('seed 退出 0', seed.code === 0, seed.out.slice(-200));
-  const ex = run(['export', join(tmp, '渡口-storyboard.json'),
-    '--cast', join(EX, '渡口-cast.json'), '--art', join(EX, '渡口-art.json'), '--out', join(tmp, 'prompts')], tmp);
-  ok('export 退出 0', ex.code === 0, ex.out.slice(-200));
-  const firstShot = JSON.parse(readFileSync(join(tmp, '渡口-storyboard.json'), 'utf8')).episodes[0].shots[0].shotId;
-  ok('导出 shots/<id>/first-frame.txt 存在', existsSync(join(tmp, 'prompts', 'shots', firstShot, 'first-frame.txt')));
-  ok('导出 shots/<id>/h3.txt 存在', existsSync(join(tmp, 'prompts', 'shots', firstShot, 'h3.txt')));
-  ok('导出 characters/<id>.txt 存在', existsSync(join(tmp, 'prompts', 'characters', 'C01-沈知微.txt')));
-  const charTxt = readFileSync(join(tmp, 'prompts', 'characters', 'C01-沈知微.txt'), 'utf8');
-  ok('角色 txt 含 Identity Lock 不可变特征', charTxt.includes('Identity Lock') && charTxt.includes('oval face'));
-  ok('角色 txt 含 Wardrobe 展开', charTxt.includes('W01') && charTxt.includes('navy-blue'));
-  const ff = readFileSync(join(tmp, 'prompts', 'shots', firstShot, 'first-frame.txt'), 'utf8');
-  ok('首帧 txt 注入 wardrobe 描述', ff.includes('navy-blue') || ff.includes('wearing'));
-  // Bug1：h3.txt 必须含 I2VA 首帧引用句（"is fully referenced"），不可被 formatH3 丢掉
-  const h3txt = readFileSync(join(tmp, 'prompts', 'shots', firstShot, 'h3.txt'), 'utf8');
-  ok('h3.txt 含 I2VA 首帧引用句（不丢关键信息）', h3txt.includes('is fully referenced') || h3txt.includes('For the target video'), h3txt.slice(0, 120));
-  // Bug3：只有 sheet（无 portrait/path）的角色，refImagePaths 不得把 sheet 提示词文本当路径
-  const sheetOnly = {
-    source: '仅sheet', params: {}, characters: [
-      { id: 'C09', name: '仅sheet角', image: { sheet: 'Single character model sheet, a tall man in grey coat...' }, voice: { timbre: 'x' } }
-    ]
-  };
-  const sc = join(tmp, 'sheet-cast.json'); writeFileSync(sc, JSON.stringify(sheetOnly, null, 2));
-  const ri = run(['seed', join(EX, '渡口-script.json'), '--outline', join(EX, '渡口-outline.json'),
-    '--art', join(EX, '渡口-art.json'), '--cast', sc, '--autofill', '--out', join(tmp, 'sheet-board.json')], tmp);
-  ok('仅 sheet 角色 seed 退出 0', ri.code === 0, ri.out.slice(-150));
-  const sb = JSON.parse(readFileSync(join(tmp, 'sheet-board.json'), 'utf8'));
-  const anySheet = sb.episodes.some(e => e.shots.some(s => (s.refImagePaths || []).some(p => p.includes('model sheet'))));
-  ok('sheet 文本不进 refImagePaths（降级为占位符）', !anySheet);
-
-  // Iteration 5：direction 块注入 + export FINAL/meta
-  const board = JSON.parse(readFileSync(join(tmp, '渡口-storyboard.json'), 'utf8'));
-  const dirShot = board.episodes[0].shots.find(s => s.direction);
-  ok('autofill 后 shot.direction 已注入骨架', !!dirShot && dirShot.direction && dirShot.direction.framing && dirShot.direction.visualFocus, JSON.stringify(dirShot && dirShot.direction));
-  ok('direction.lens 特写用 85mm / 其他 35mm', board.episodes[0].shots.every(s => !s.direction || (s.shotType.includes('特写') ? s.direction.lens === '85mm' : s.direction.lens === '35mm')), JSON.stringify(board.episodes[0].shots.map(s => s.shotType + ':' + (s.direction && s.direction.lens))));
-  // first-frame.txt 带 FINAL 标签；meta.txt 含生成说明
-  ok('first-frame.txt 含 FINAL 标签', ff.includes('FINAL FIRST FRAME PROMPT'));
-  ok('导出 shots/<id>/meta.txt 存在', existsSync(join(tmp, 'prompts', 'shots', firstShot, 'meta.txt')));
-  const meta = readFileSync(join(tmp, 'prompts', 'shots', firstShot, 'meta.txt'), 'utf8');
-  ok('meta.txt 含建议时长 + 视频模式 + 导演概要', meta.includes('建议时长') && meta.includes('视频模式') && meta.includes('导演'), meta.slice(0, 200));
-  // 向后兼容：无 direction 的旧 storyboard 仍可 seed（手动构造无 direction 字段的 shot）
-  const legacyBoard = JSON.parse(JSON.stringify(board));
-  legacyBoard.episodes[0].shots[0].direction = undefined;
-  const lb = join(tmp, 'legacy-board.json'); writeFileSync(lb, JSON.stringify(legacyBoard, null, 2));
-  const lf = run(['export', lb, '--cast', join(EX, '渡口-cast.json'), '--art', join(EX, '渡口-art.json'), '--out', join(tmp, 'prompts-legacy')], tmp);
-  ok('无 direction 旧 storyboard 仍可 export（向后兼容）', lf.code === 0, lf.out.slice(-150));
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].seconds = 1;
+  ok(!gate(doc, 'cut-length').ok, '分镜短于 2 秒被拦');
 }
-
-// ── 9. split 保住 sourceBeat + G1 覆盖门仍过 ──
-console.log('[9] split 复杂镜保留 sourceBeat，validate 仍通过');
 {
-  const tmp = mkdtempSync(join(tmpdir(), 'sb-'));
-  const seed = run(['seed', join(EX, '渡口-script.json'),
-    '--outline', join(EX, '渡口-outline.json'), '--art', join(EX, '渡口-art.json'),
-    '--cast', join(EX, '渡口-cast.json'), '--autofill', '--out', join(tmp, '渡口-storyboard.json')], tmp);
-  ok('seed 退出 0', seed.code === 0);
-  const seedBoard = JSON.parse(readFileSync(join(tmp, '渡口-storyboard.json'), 'utf8'));
-  const seedBoardShots = seedBoard.episodes.reduce((a, e) => a + e.shots.length, 0);
-  const sp = run(['split', join(tmp, '渡口-storyboard.json'), '--auto', '--autofill', '--cast', join(EX, '渡口-cast.json'),
-    '--art', join(EX, '渡口-art.json'), '--out', join(tmp, 'split.json')], tmp);
-  ok('split --auto 退出 0', sp.code === 0, sp.out.slice(-200));
-  const split = JSON.parse(readFileSync(join(tmp, 'split.json'), 'utf8'));
-  const allHaveBeat = split.episodes.every(e => e.shots.every(s => s.sourceBeat && typeof s.sourceBeat.beatNo === 'number'));
-  ok('拆分后所有子镜保留 sourceBeat', allHaveBeat);
-  const v = run(['validate', join(tmp, 'split.json'),
-    '--script', join(EX, '渡口-script.json'), '--outline', join(EX, '渡口-outline.json'),
-    '--art', join(EX, '渡口-art.json'), '--cast', join(EX, '渡口-cast.json')], tmp);
-  ok('拆分后 validate 退出 0（G1/G2 仍过）', v.code === 0, v.out.slice(-200));
-  ok('拆分后镜头数 > 原镜头数（真拆出子镜，非空转）', split.episodes.reduce((a, e) => a + e.shots.length, 0) > seedBoardShots, JSON.stringify({ after: split.episodes.reduce((a, e) => a + e.shots.length, 0), before: seedBoardShots }));
-  // 方案 A 自洽：被标记 recommendSplit=true 的动作镜都应真的拆出子镜（标记与拆镜能力对齐）
-  const recShots = seedBoard.episodes.flatMap(e => e.shots).filter(s => s.complexity && s.complexity.recommendSplit);
-  const splitIds = new Set(split.episodes.flatMap(e => e.shots).map(s => s.shotId.replace(/[a-z]$/, '')));
-  const allRecSplit = recShots.every(s => splitIds.has(s.shotId));
-  ok('所有 recommendSplit=true 的镜都被真实拆分（标记↔拆镜能力对齐）', recShots.length === 0 || allRecSplit, JSON.stringify({ rec: recShots.length, aligned: allRecSplit }));
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].seconds = 6;
+  const g = gate(doc, 'cut-length');
+  ok(!g.ok, '分镜超 5 秒被拦——3 秒节奏是硬门');
+  ok(g.detail.includes('E01-01#1'), '点名到切');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.params = { maxCutSeconds: 3 };
+  ok(!gate(doc, 'cut-length').ok, '上限收紧到 3 秒后原样例不再达标');
+}
+// dialogue-fit
+{
+  const doc = clone(FIXTURE);
+  const seg = doc.episodes[0].segments.find((s) => s.id === 'E01-05');
+  seg.cuts[0].seconds = 4; // 台词 4.4 秒
+  const g = gate(doc, 'dialogue-fit');
+  ok(!g.ok, '台词装不进分镜被拦');
+  ok(g.detail.includes('E01-05#1'), '点名到切');
+}
+// ep-duration
+{
+  const doc = clone(FIXTURE);
+  for (const s of doc.episodes[0].segments) for (const c of s.cuts) c.seconds = Math.min(5, c.seconds + 2);
+  ok(gate(doc, 'ep-duration').detail.includes('超'), '写超总时长被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  for (const s of doc.episodes[0].segments) for (const c of s.cuts) c.seconds = Math.max(2, c.seconds - 2);
+  ok(gate(doc, 'ep-duration').detail.includes('欠'), '写欠总时长被拦');
+}
+// crowd
+{
+  const doc = clone(FIXTURE);
+  const cut = doc.episodes[0].segments.find((s) => s.id === 'E01-09').cuts[2];
+  cut.characters = ['C01', 'C02', 'C03', 'C04'];
+  ok(!gate(doc, 'crowd').ok, '四人同框无拆解说明被拦');
+  cut.note = '全景交代后立刻切正反打';
+  ok(gate(doc, 'crowd').ok, '带拆解说明就放行');
+}
+// segment-id
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[3].id = 'E01-99';
+  const g = gate(doc, 'segment-id');
+  ok(!g.ok, '断号被拦');
+  ok(g.detail.includes('E01-04'), '报出应有的段号');
+}
+// size-phrase
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].frame = 'a foggy pier at dawn, cinematic';
+  ok(!gate(doc, 'size-phrase').ok, '分镜图提示词缺景别短语被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].size = '大远景';
+  ok(!gate(doc, 'size-phrase').ok, '景别不在枚举里被拦');
+}
+// camera-phrase
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].camera = '推';
+  ok(!gate(doc, 'camera-phrase').ok, '运镜不在 H3 词表里被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  const seg = doc.episodes[0].segments[0];
+  seg.h3Prompt = seg.h3Prompt.replace('holds a static shot as fog rolls in', 'stays still as fog rolls in');
+  const g = gate(doc, 'camera-phrase');
+  ok(!g.ok, '运镜词没写进自己的 [Shot k] 段落被拦');
+  ok(g.detail.includes('E01-01#1'), '点名到切');
+}
+// h3-structure — 对齐指令由分镜结构推导，逐字对账
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].seconds = 4; // 时长改了、提示词没跟着改
+  ok(gate(doc, 'h3-structure').detail.includes('对不上'), '分镜秒数一改，旧对齐指令立刻对不上');
+}
+{
+  const doc = clone(FIXTURE);
+  const seg = doc.episodes[0].segments[0];
+  seg.h3Prompt = seg.h3Prompt.replace('[Shot 2] At 00:03.000,', '[Shot 2] At 00:03.500,');
+  const g = gate(doc, 'h3-structure');
+  ok(!g.ok, '切点时刻和分镜秒数累计不一致被拦');
+  ok(g.detail.includes('切点时刻'), '报出哪一处时刻错了');
+}
+{
+  const doc = clone(FIXTURE);
+  const seg = doc.episodes[0].segments[0];
+  seg.h3Prompt = seg.h3Prompt.replace('overall_soundscape:', 'ambient_sound:');
+  ok(gate(doc, 'h3-structure').detail.includes('核心字段'), '三字段缺失被拦');
+}
+// h3-dialogue
+{
+  const doc = clone(FIXTURE);
+  const seg = doc.episodes[0].segments[0];
+  seg.h3Prompt = seg.h3Prompt.replace('上船喽——过河的抓紧，雾要变天。', 'the ferryman calls out.');
+  const g = gate(doc, 'h3-dialogue');
+  ok(!g.ok, '台词没进 <d> 块被拦');
+  ok(gate(doc, 'h3-dialogue', {}).detail.includes('跳过'), '没给剧本时本门跳过并明说');
+}
+// h3-lang — 语言与设定双向对账（默认英文 = 官方口径）
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].h3Prompt += ' 浓雾弥漫。';
+  ok(!gate(doc, 'h3-lang').ok, '英文提示词在 <d> 台词之外混中文被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.promptLang = 'zh';
+  ok(!gate(doc, 'h3-lang').ok, '设定中文、正文却是英文被拦——语言开关双向都管');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].h3Prompt = doc.episodes[0].segments[0].h3Prompt.replace('the old ferryman squatting', '老周 squatting');
+  ok(!gate(doc, 'prompt-no-names').ok, '英文模式下 H3 提示词里的人名被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.promptLang = 'zh';
+  doc.episodes[0].segments[0].h3Prompt += ' 老周站在船头。';
+  ok(gate(doc, 'prompt-no-names').ok, '中文模式 H3 提示词人名放行——身份靠分镜图锚定');
+}
+eq(h3Remainder('a <d>[Chinese] 你好</d> b "营业中" c'), 'a   b   c', 'h3Remainder 剔除 <d> 块与画面文字');
+// prompt-english
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].frame = 'extreme wide shot 渡口的浓雾清晨';
+  ok(!gate(doc, 'prompt-english').ok, '分镜图提示词混中文被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].frame = '  ';
+  ok(!gate(doc, 'prompt-english').ok, '空分镜图提示词被拦');
+}
+// prompt-no-names
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].frame += ' 沈知微 standing on the pier';
+  ok(!gate(doc, 'prompt-no-names').ok, '分镜图提示词出现角色名被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[1].frame += ' 老伯 squatting'; // cast 里的别名
+  ok(!gate(doc, 'prompt-no-names').ok, '角色别名也拦');
+}
+// refs
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].characters = ['C05'];
+  ok(!gate(doc, 'refs').ok, '不在该场的人物被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].props = ['P02'];
+  ok(!gate(doc, 'refs').ok, '不在该场的道具被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].sceneIndex = 9;
+  ok(!gate(doc, 'refs').ok, '不存在的场次被拦');
 }
 
-console.log('');
-console.log(`结果：${pass} 通过 / ${fail} 失败`);
-process.exit(fail ? 1 : 0);
+// style-phrase — 同剧分镜图画风不许漂
+{
+  eq(DEFAULT_STYLE, 'realistic', '默认半写实');
+  ok(STYLE_PRESETS.realistic.phrase && STYLE_PRESETS.ghibli.phrase, '预设带风格短语');
+  const doc = clone(FIXTURE);
+  doc.style = '油画';
+  ok(!gate(doc, 'style-phrase').ok, '不在预设里的风格被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].frame = doc.episodes[0].segments[0].cuts[0].frame.replace('cinematic film still', 'cinematic image');
+  const g = gate(doc, 'style-phrase');
+  ok(!g.ok, '分镜图提示词缺风格短语被拦');
+  ok(g.detail.includes('E01-01#1'), '点名到切');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.style = 'ghibli';
+  ok(!gate(doc, 'style-phrase').ok, '换成吉卜力后写实短语不再达标——换风格是整批换');
+}
+
+/* ---------------- exportPack（H3 投产包） ---------------- */
+
+{
+  const pack = exportPack(FIXTURE, SCRIPT, { imageExists: () => false });
+  eq(pack.files.length, 11, '十段 prompt.md + 一份 manifest');
+  ok(pack.files.some((f) => f.path === 'E01-01/prompt.md'), '每段一个文件夹里的 prompt.md');
+  const p01 = pack.files.find((f) => f.path === 'E01-01/prompt.md');
+  ok(p01.content.startsWith('# E01-01 · H3 提示词'), 'prompt.md 带标题');
+  ok(p01.content.includes('Picture 1 = f1.png（**首帧**，钉 0.00 秒）'), '明确指定哪个文件是首帧');
+  ok(p01.content.includes('Picture 4 = f4.png（钉 10.00 秒）'), '每张图的切点秒数写明');
+  ok(p01.content.includes('---\n\nHow the reference pictures align'), '分隔线以下是 h3Prompt 原样（官方英文口径）');
+  const m = pack.manifest.find((x) => x.segment === 'E01-01');
+  eq(m.pictures.join(','), 'E01-01/f1.png,E01-01/f2.png,E01-01/f3.png,E01-01/f4.png', 'Picture 序 = 文件夹里的 f1..fn');
+  eq(m.cutStarts.join(','), '0,3,6,10', 'manifest 带切点时刻表');
+  eq(m.missing.length, 4, '缺图逐张标注');
+  ok(pack.missingTotal > 0, '缺图总数上报');
+}
+{
+  const pack = exportPack(FIXTURE, SCRIPT, { imageExists: () => true, dir: 'out' });
+  eq(pack.missingTotal, 0, '图齐了就没有缺图标注');
+  ok(pack.files.some((f) => f.path === 'out/manifest.json'), '--out 改导出目录');
+  ok(pack.files.some((f) => f.path === 'out/E01-01/prompt.md'), '段文件夹跟着 --out 走');
+}
+
+/* ---------------- validateStoryboard 结构检查 ---------------- */
+
+eq(validateStoryboard(FIXTURE, CTX).length, 0, '样例零违规');
+ok(validateStoryboard(null).length > 0, 'null 不崩');
+ok(validateStoryboard({}).some((p) => p.includes('source')), '缺 source 报出来');
+ok(validateStoryboard({ source: 'x', episodes: [] }).some((p) => p.includes('episodes')), '空 episodes 报出来');
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0] = { id: 'E01-01' };
+  const problems = validateStoryboard(doc, CTX);
+  ok(problems.some((p) => p.includes('sceneIndex')), '缺 sceneIndex 报出来');
+  ok(problems.some((p) => p.includes('h3Prompt')), '缺 H3 提示词报出来');
+  ok(problems.some((p) => p.includes('没有分镜')), '缺 cuts 报出来');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0] = { beats: [1, 1] };
+  const problems = validateStoryboard(doc, CTX);
+  ok(problems.some((p) => p.includes('seconds')), '分镜缺秒数报出来');
+  ok(problems.some((p) => p.includes('frame')), '分镜缺分镜图提示词报出来');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes.push(clone(doc.episodes[0]));
+  ok(validateStoryboard(doc, CTX).some((p) => p.includes('重复')), '重复集号报出来');
+}
+
+/* ---------------- seed ---------------- */
+
+const seeded = seedFromScript(SCRIPT);
+eq(seeded.source, '渡口', 'seed 带剧名');
+eq(seeded.episodes.length, 6, 'seed 全六集');
+eq(seeded.episodes[0].segments.length, 0, 'segments 留空给模型切');
+eq(seeded.episodes[0].seedScenes.length, 2, '工作底稿带两场');
+eq(seeded.episodes[0].seedScenes[0].beats.length, 13, '底稿带全部节拍');
+ok(seeded.episodes[0].seedScenes[0].beats[0].seconds > 0, '每拍带秒数');
+eq(seedFromScript(SCRIPT, [2, 3]).episodes.map((e) => e.ep).join(','), '2,3', '--eps 区间过滤');
+eq(seedFromScript({}).episodes.length, 0, '空剧本不崩');
+
+/* ---------------- slug / 枚举 ---------------- */
+
+eq(slug('渡口'), '渡口', '中文原样');
+eq(slug('  '), 'storyboard', '空名兜底');
+ok(Object.values(SHOT_SIZES).every((s) => s.zh && s.phrase), '景别枚举带中文名与英文短语');
+ok(Object.keys(CAMERA_MOVES).length >= 18, '运镜词表覆盖 H3 全部动作类型');
+ok(CAMERA_MOVES['Static Shot'] === '固定' && CAMERA_MOVES['Push In'] === '推', '运镜词表中英对照');
+
+/* ---------------- render markdown ---------------- */
+
+const md = renderMarkdown(FIXTURE, CTX);
+ok(md.includes('# 渡口 · 分镜（第 1 集）'), 'md 标题');
+ok(md.includes('### E01-01 · 渡口栈桥（浓雾清晨）'), 'md 段头带场景名与光照');
+ok(md.includes('H3 视频提示词'), 'md 带逐段 H3 提示词');
+ok(md.includes('How the reference pictures align'), '多分镜段的对齐指令完整可复制');
+ok(md.includes('[Shot 2] At 00:03.000,'), '切点时刻原样进 md');
+ok(md.includes('老周'), 'md 说话人显示名字');
+ok(md.includes('生成批次单') && md.includes('配音对齐单'), 'md 带两张工单');
+ok(renderMarkdown(FIXTURE, { script: SCRIPT }).includes('C03'), '不给 outline 退回裸 ID');
+
+/* ---------------- render html ---------------- */
+
+const html = renderHtml(FIXTURE, CTX);
+ok(html.includes('<!doctype html>'), 'html 完整文档');
+ok(!/src="http|href="http|@import|url\(http/.test(html), '零外部资源');
+ok(html.includes('分镜节奏带'), '01 分镜节奏带');
+ok(html.includes('分集分镜表'), '02 分集分镜表');
+ok(html.includes('生成批次单'), '03 生成批次单');
+ok(html.includes('配音对齐单'), '04 配音对齐单');
+ok(html.includes('✓ 质量门 16 / 16'), '页眉徽章全绿');
+ok(html.includes('class="rseg"'), '节奏带按段分组（粗分隔）');
+ok(html.includes('#seg-E01-01'), '节奏带段可跳转');
+ok(html.includes('主分镜图 · #1 未生成'), '主分镜图缺图时显示占位不装有');
+ok(html.includes('#2 未生成'), '子分镜图缺图有小占位');
+ok(html.includes('class="shots clip"'), '段卡区默认截断');
+ok(html.includes('展开全部段'), '每集自带展开按钮');
+ok(html.includes('H3 提示词'), '段卡带 H3 提示词面板');
+ok(html.includes('class="duo"'), '分镜列表与提示词面板五五分栏');
+ok(html.includes('static shot'), '英文提示词正文进面板');
+ok(html.includes('integrated_multimodal_description'), '官方骨架字段进面板');
+ok(html.includes('[Shot 2] At'), '逐镜换行的结构化正文进面板');
+ok(html.includes('分镜图提示词'), '每个分镜带分镜图提示词复制按钮');
+ok(html.includes('id="lightbox"'), '点图放大');
+ok(html.includes('渡口-storyboard.json'), '导出文件名');
+ok(html.includes('批次 01'), '批次卡编号');
+ok(html.includes('@media print'), '打印样式');
+ok(html.includes('老周'), 'html 里 ID 换成名字');
+{
+  const withImg = renderHtml(FIXTURE, { ...CTX, imageExists: () => true });
+  ok(withImg.includes('"E01-01/f1.png"'), '主分镜图从段文件夹读');
+  ok(withImg.includes('"E01-01/f2.png"'), '子分镜图同样从段文件夹读');
+  ok(!withImg.includes('未生成'), '有图时不再显示占位');
+}
+// 病灶横幅
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].segments[0].cuts[0].seconds = 6;
+  const h = renderHtml(doc, CTX);
+  ok(h.includes('class="galert"'), '有门未过时页顶挂病灶横幅');
+  ok(h.includes('gatepill fail'), '徽章翻红');
+}
+// XSS：模型数据全部过 esc
+{
+  const doc = clone(FIXTURE);
+  doc.source = '<script>alert(1)</script>';
+  doc.episodes[0].segments[0].note = '<img src=x onerror=alert(1)>';
+  const h = renderHtml(doc, { script: SCRIPT });
+  ok(!h.includes('<script>alert(1)</script>'), '标题被转义');
+  ok(!h.includes('<img src=x'), 'note 被转义');
+  ok(h.includes('\\u003c'), '内嵌 JSON 的 < 转成 \\u003c，防 </script 截断');
+}
+
+console.log(`✓ ${passed} 项自测全部通过`);

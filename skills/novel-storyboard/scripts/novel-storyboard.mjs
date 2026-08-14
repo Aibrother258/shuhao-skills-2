@@ -1,1516 +1,1423 @@
 #!/usr/bin/env node
-'use strict';
-// novel-storyboard — 把剧本(script.json)拆成可生成的分镜表
-// 消费上游：novel-script(script.json) / novel-art(art.json) / novel-characters(cast.json) / novel-outline(outline.json)
-// 产出：<书名>-storyboard.json + 渲染报告(MD/HTML)
-// 零依赖、零 API key。所有约束由脚本确定性检查，不靠模型自觉。
+// novel-storyboard — deterministic helpers for the novel-storyboard skill (分镜).
+// Zero dependencies on purpose: the skill must work in any directory
+// without an npm install. Node 18+ (stdlib only).
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
-import { dirname, resolve, basename, extname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-const SCRIPT_VERSION = '1.0.0';
+/* ------------------------------------------------------------------ */
+/* 常量                                                                */
+/* ------------------------------------------------------------------ */
+/*
+ * AI 短剧的前提刻在骨子里，三层结构也由此而来：
+ *
+ *   段（segment）＝ 一次视频生成调用，上限就是模型单段时长（默认 15 秒）
+ *   分镜（cut）  ＝ 段内的一次剪切，2–5 秒——短剧观众的注意力节奏
+ *   分镜图       ＝ 每个分镜一张关键帧：第 1 个分镜的是主分镜图（钉在
+ *                  0.00 秒），其余是子分镜图（各钉在自己的切点时刻）
+ *
+ * 一段的画面由这串分镜图 + 一条 H3 提示词共同控制：多图对齐指令
+ * 把每张图钉在对应秒数上，[Shot k] 的切点时刻和分镜秒数逐一对账。
+ * 多切一刀的成本几乎为零，所以不心疼分镜数量，只守节奏。
+ */
 
-// ── 可调参数 ──────────────────────────────────────────────
-const DEFAULT_PARAMS = {
-  charsPerSecond: 4.5,   // 台词行语速（字/秒）
-  actionSeconds: 2.5,    // 单条动作节拍基础时长
-  tolerance: 0.15,       // 单集预估时长相对 script 目标时长的容差
-  shotSecondsFloor: 1.5, // 单镜最短秒数
-  shotSecondsCap: 10,    // 单镜最长秒数
-  splitSecondsFloor: 1.0, // split 子镜下限（更低，允许把短动作拍拆开；G4 对 split 镜用此值）
-  style: 'realistic', // 美术风格（默认 realistic=半写实厚涂；与 art.json 对齐，seed 时若传 --art 则以 art.json.style 为准）
-  // ── H3 (MiniMax H3) 视频提示词相关 ──
-  promptFormat: 'h3',    // 'h3' = 生成 H3 结构化视频提示词；'legacy' = 仅首帧图生提示词
-  h3Mode: 'i2va',        // 'i2va' = 首帧图+角色参考图驱动(图生视频，可抽卡)；'t2va' = 纯文生视频
-  h3Style: 'Live-action, cinematic',
-  h3Music: 'A soft, understated background score at a slow tempo that supports the scene mood.'
+export const DEFAULT_PARAMS = {
+  maxSegmentSeconds: 15, // 视频模型单段生成上限（秒）
+  minCutSeconds: 2,      // 单个分镜下限
+  maxCutSeconds: 5,      // 单个分镜上限——3 秒左右是短剧的呼吸
+  maxOnScreen: 3,        // 单个分镜同框人数上限，超了必须带拆解说明
+  tolerance: 0.15,       // 每集总时长对剧本目标的容差
 };
 
-function paramsOf(doc) {
-  return { ...DEFAULT_PARAMS, ...(doc && doc.params ? doc.params : {}) };
+export function paramsOf(doc) {
+  return { ...DEFAULT_PARAMS, ...(doc?.params ?? {}) };
 }
 
-// ── 小工具 ────────────────────────────────────────────────
-const CJK = /[㐀-鿿]/;
-function hasCJK(s) { return s ? CJK.test(String(s)) : false; }
-function lineChars(s) { return s ? String(s).replace(/\s+/g, '').length : 0; }
-function getJSON(p) { return JSON.parse(readFileSync(p, 'utf8')); }
-function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
-function slugify(s) {
-  return String(s || '').trim().replace(/[^\w一-龥]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase() || 'story';
-}
-function fmtSec(s) { return (Math.round((s || 0) * 10) / 10).toFixed(1); }
-function pad(n, w) { return String(n).padStart(w, '0'); }
-
-const SHOT_TYPES = ['全景', '远景', '中景', '近景', '特写', '过肩', '主观', '空镜'];
-const SHOT_TYPES_EN = { '全景': 'wide shot', '远景': 'establishing shot', '中景': 'medium shot', '近景': 'close-up', '特写': 'extreme close-up', '过肩': 'over-the-shoulder shot', '主观': 'POV shot', '空镜': 'empty establishing shot' };
-const CROWD_KEYWORDS = ['人群', '多人', 'crowd', 'crowds', 'a crowd', 'many people'];
-
-// 情绪词表（用于 direction.emotion 确定性推断）：动作文本含关键词 → 对应情绪标签
-const EMOTION_MAP = [
-  ['震惊', 'shocked'], ['惊愕', 'startled'], ['惊讶', 'surprised'], ['怒', 'angry'],
-  ['悲', 'sad'], ['喜', 'happy'], ['慌', 'panicked'], ['愣', 'frozen'], ['怔', 'stunned'],
-  ['变色', 'alarmed'], ['骤变', 'alarmed'], ['平静', 'calm'], ['沉思', 'pensive'],
-  ['微笑', 'gentle smile'], ['冷笑', 'cold smirk'], ['恐惧', 'fearful'], ['犹豫', 'hesitant']
-];
-
-// 姿态词表（用于 direction.pose 确定性推断）：动作文本含关键词 → 对应姿态
-const POSE_MAP = [
-  ['转身', 'turning away'], ['走向', 'walking forward'], ['走', 'walking'],
-  ['站起', 'standing up'], ['坐下', 'seated'], ['蹲', 'crouching'],
-  ['拿起', 'reaching for'], ['看向', 'gazing toward'], ['回头', 'turning head'],
-  ['伸手', 'extending hand'], ['倚', 'leaning'], ['俯身', 'bending forward'],
-  ['迈步', 'taking a step'], ['离开', 'walking away']
-];
-
-// H3 运镜词表：把中文机位映射到 H3 的 camera motion 描述
-const CAMERA_H3 = {
-  '固定机位': 'The camera holds a static shot.',
-  '固定': 'The camera holds a static shot.',
-  '推': 'The camera pushes in with small amplitude at slow speed.',
-  '推近': 'The camera pushes in with small amplitude at slow speed.',
-  '推入': 'The camera pushes in with small amplitude at slow speed.',
-  '拉': 'The camera pulls out with small amplitude at slow speed.',
-  '拉远': 'The camera pulls out with small amplitude at slow speed.',
-  '拉出': 'The camera pulls out with small amplitude at slow speed.',
-  '摇': 'The camera pans right with small amplitude at slow speed.',
-  '横摇': 'The camera pans right with small amplitude at slow speed.',
-  '移': 'The camera tracks the subject with small amplitude at slow speed.',
-  '跟': 'The camera tracks the subject with small amplitude at slow speed.',
-  '跟拍': 'The camera tracks the subject with small amplitude at slow speed.',
-  '升': 'The camera pedestals up with small amplitude at slow speed.',
-  '降': 'The camera pedestals down with small amplitude at slow speed.',
-  '环绕': 'The camera arcs around the subject with small amplitude at slow speed.',
-  '手持': 'The camera moves with a subtle handheld drift.'
+/** 景别枚举：英文短语必须出现在该分镜的分镜图提示词里。 */
+export const SHOT_SIZES = {
+  'extreme-wide': { zh: '大远景', phrase: 'extreme wide shot' },
+  wide: { zh: '全景', phrase: 'wide shot' },
+  medium: { zh: '中景', phrase: 'medium shot' },
+  close: { zh: '特写', phrase: 'close-up' },
+  'extreme-close': { zh: '大特写', phrase: 'extreme close-up' },
 };
 
-// 动作文本 → 环境音效（overall_soundscape 启发式）
-const SFX_HINTS = [
-  ['脚步', 'soft footsteps on the ground'],
-  ['门', 'a door creaks and clicks shut'],
-  ['水', 'water drips steadily'],
-  ['雨', 'rain taps against the windows'],
-  ['风', 'wind passes through the space'],
-  ['火', 'a fire crackles'],
-  ['碗', 'chopsticks tap against a bowl'],
-  ['笑', 'a faint laugh slips out'],
-  ['哭', 'a choked sob'],
-  ['船', 'the ferry horn sounds in the distance'],
-  ['车', 'a car engine idles'],
-  ['电话', 'a phone rings'],
-  ['钟', 'a distant bell tolls'],
-  ['雷', 'thunder rolls overhead']
-];
+/** 运镜枚举：直接用 H3 官方词表，原样写进该分镜的 [Shot k] 段落。 */
+export const CAMERA_MOVES = {
+  'Static Shot': '固定',
+  'Push In': '推',
+  'Pull Out': '拉',
+  'Zoom In': '变焦推',
+  'Zoom Out': '变焦拉',
+  'Pan Left': '左摇',
+  'Pan Right': '右摇',
+  'Truck Left': '左移',
+  'Truck Right': '右移',
+  'Tilt Up': '仰摇',
+  'Tilt Down': '俯摇',
+  'Pedestal Up': '升',
+  'Pedestal Down': '降',
+  'Arc Shot': '环绕',
+  'Tracking Shot': '跟拍',
+  'Shake Slightly': '轻微晃动',
+  'Shake Strongly': '强烈晃动',
+  'POV': '主观视角',
+  'Roll Clockwise': '顺旋',
+  'Roll Counterclockwise': '逆旋',
+};
 
-// H3 规范：括号内的中文台词关键词，用于锁定 CJK 检查豁免
-const H3_DIALOGUE_RE = /<d>\[Chinese\][\s\S]*?<\/d>/g;
+/** 分镜图风格预设：与 novel-characters / novel-art 同名对齐（realistic / ghibli）。
+ *  短语必须出现在每条分镜图提示词里——同一部剧的分镜图不许画风漂。 */
+export const STYLE_PRESETS = {
+  realistic: { zh: '半写实电影感', phrase: 'cinematic film still' },
+  ghibli: { zh: '吉卜力手绘', phrase: 'hand-painted anime film still' },
+};
+export const DEFAULT_STYLE = 'realistic';
 
-// ── 构建上游上下文（用于 seed autofill 与对账类质量门）─────────
-function buildContext({ script, outline, art, cast }) {
-  const ctx = { script: null, outline: null, art: null, cast: null };
-  if (script && existsSync(script)) ctx.script = getJSON(script);
-  if (outline && existsSync(outline)) ctx.outline = getJSON(outline);
-  if (art && existsSync(art)) ctx.art = getJSON(art);
-  if (cast && existsSync(cast)) ctx.cast = getJSON(cast);
+const CJK = /[㐀-鿿぀-ヿ가-힯]/;
+const r1 = (n) => Math.round(n * 10) / 10;
 
-  // C-id → 角色名（来自 outline）
-  ctx.cidToName = {};
-  if (ctx.outline && Array.isArray(ctx.outline.characters)) {
-    for (const c of ctx.outline.characters) ctx.cidToName[c.id] = c.name;
+/* ------------------------------------------------------------------ */
+/* H3 提示词的确定性骨架                                                 */
+/* ------------------------------------------------------------------ */
+/*
+ * 结构由 H3 官方规范（h3-prompt-writing skill）定死，而且对齐指令和
+ * 切点时刻都能从分镜结构推导出来——所以逐字设门，一个字符都不许漂。
+ */
+
+export const H3_I2VA_LINE =
+  'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.';
+export const H3_FIELDS = ['integrated_multimodal_description:', 'overall_soundscape:', 'non_diegetic_music:'];
+
+/** 骨架 token 按语言取：默认英文（官方规范口径）；'zh' 整条中文（只保留 <d>[Chinese] 和 (S1) 两个模型级 token）。 */
+export const H3_TOKENS = {
+  zh: {
+    i2va: '目标视频在 0.00 秒处完全参照图 1（来自镜头 1）。',
+    alignHead: '参考图与目标视频的对齐——',
+    alignItem: (k, t) => `图 ${k}（来自镜头 ${k}）对齐目标视频 ${t} 秒处`,
+    alignTail: '。',
+    fields: ['整体视听描述：', '整体音景：', '非叙事配乐：'],
+    shot: (k) => `[镜头 ${k}]`,
+    cutMark: (k, time) => `[镜头 ${k}] 于 ${time}，`,
+  },
+  en: {
+    i2va: H3_I2VA_LINE,
+    alignHead: 'How the reference pictures align with the target video — ',
+    alignItem: (k, t) => `Picture ${k} (from Shot ${k}) aligns with the ${t}-second mark of the target video`,
+    alignTail: '.',
+    fields: H3_FIELDS,
+    shot: (k) => `[Shot ${k}]`,
+    cutMark: (k, time) => `[Shot ${k}] At ${time},`,
+  },
+};
+
+/** 段内切点时刻表：[0, c1, c1+c2, …]（不含结尾）。 */
+export function cutStarts(cuts) {
+  const starts = [];
+  let t = 0;
+  for (const c of cuts ?? []) {
+    starts.push(r1(t));
+    t += c?.seconds ?? 0;
   }
-  // 角色名 → cast.json 形象提示词
-  ctx.nameToCast = {};
-  if (ctx.cast && Array.isArray(ctx.cast.characters)) {
-    for (const c of ctx.cast.characters) ctx.nameToCast[c.name] = c;
-  }
-  // sceneId → { name, lighting:[{state,prompt}], image.negativePrompt }（来自 art）
-  ctx.sceneMap = {};
-  if (ctx.art && Array.isArray(ctx.art.scenes)) {
-    for (const s of ctx.art.scenes) {
-      const lighting = Array.isArray(s.lighting) ? s.lighting.map(l => ({ state: l.state, prompt: l.prompt })) : [];
-      ctx.sceneMap[s.id] = {
-        name: s.name,
-        lighting,
-        negativePrompt: s.image && s.image.negativePrompt ? s.image.negativePrompt : null
-      };
-    }
-  }
-  // propId → [{state,prompt}]（来自 art）
-  ctx.propMap = {};
-  if (ctx.art && Array.isArray(ctx.art.props)) {
-    for (const p of ctx.art.props) {
-      const states = Array.isArray(p.states) ? p.states.map(st => ({ state: st.state, prompt: st.prompt })) : [];
-      ctx.propMap[p.id] = { name: p.name, states };
-    }
-  }
-  return ctx;
+  return starts;
 }
 
-// ── 从剧本拆镜 ────────────────────────────────────────────
-// 每个 beat（动作节拍 / 台词行 / 心声）→ 一条 shot。
-function deriveShotsFromScript(script, { ctx, autofill, params }) {
+/** [Shot k] 的切点时刻格式：00:03.000（分:秒.毫秒）。 */
+export function h3CutTime(t) {
+  const m = Math.floor(t / 60);
+  const s = Math.floor(t % 60);
+  const ms = Math.round((t - Math.floor(t)) * 1000);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+/**
+ * 首行对齐指令：单分镜的段用 I2VA 固定句式；多分镜的段把每张分镜图
+ * 钉在自己的切点秒数上。整行由分镜结构推导，validate 逐字对账。
+ */
+export function h3AlignmentLine(cuts, lang = 'en') {
+  const tk = H3_TOKENS[lang] ?? H3_TOKENS.zh;
+  if (!cuts || cuts.length <= 1) return tk.i2va;
+  const starts = cutStarts(cuts);
+  const parts = cuts.map((c, i) => tk.alignItem(i + 1, starts[i].toFixed(2)));
+  return `${tk.alignHead}${parts.join(lang === 'en' ? '; ' : '；')}${tk.alignTail}`;
+}
+
+/** 台词/画面文字之外的部分——H3 要求它全英文，人名也只许出现在 <d> 里。 */
+export function h3Remainder(prompt) {
+  return String(prompt ?? '')
+    .replace(/<d>[\s\S]*?<\/d>/g, ' ')
+    .replace(/"[^"\n]*"/g, ' ');
+}
+
+/** 把 h3Prompt 的描述正文按 [镜头 k] / [Shot k] 切成每个分镜自己的段落。 */
+export function h3CutSlices(prompt, cutCount, lang = 'en') {
+  const tk = H3_TOKENS[lang] ?? H3_TOKENS.zh;
+  const h3 = String(prompt ?? '');
+  const bodyStart = h3.indexOf(tk.fields[0]);
+  const bodyEnd = h3.indexOf(tk.fields[1]);
+  if (bodyStart < 0) return [];
+  const body = h3.slice(bodyStart, bodyEnd < 0 ? undefined : bodyEnd);
+  const slices = [];
+  for (let k = 1; k <= cutCount; k++) {
+    const a = body.indexOf(tk.shot(k));
+    if (a < 0) {
+      slices.push(null);
+      continue;
+    }
+    const b = body.indexOf(tk.shot(k + 1));
+    slices.push(body.slice(a, b < 0 ? undefined : b));
+  }
+  return slices;
+}
+
+/* ------------------------------------------------------------------ */
+/* 剧本节拍展开                                                          */
+/* ------------------------------------------------------------------ */
+/*
+ * 与 novel-script 相同的计秒规则，这里刻意重新实现而不是跨目录
+ * import——每个 skill 必须自包含、可以单独拷走。参数从 script.json
+ * 的 params 里读，两边天然一致。
+ */
+
+const SCRIPT_DEFAULTS = { charsPerSecond: 4.5, actionSeconds: 2.5 };
+const lineChars = (line) => String(line ?? '').replace(/\s+/g, '').length;
+
+/** 把 script.json 展开成分镜要认领的节拍清单：ep → scenes → beats。 */
+export function expandScript(script) {
+  const p = { ...SCRIPT_DEFAULTS, ...(script?.params ?? {}) };
+  const eps = new Map();
+  for (const ep of script?.episodes ?? []) {
+    const scenes = (ep?.scenes ?? []).map((sc, i) => ({
+      sceneIndex: i + 1,
+      sceneId: sc.sceneId,
+      lighting: sc.lighting ?? '',
+      characters: sc.characters ?? [],
+      props: sc.props ?? [],
+      beats: (sc.flow ?? []).map((b, j) => {
+        const isLine = typeof b?.line === 'string';
+        return {
+          n: j + 1,
+          kind: isLine ? 'line' : 'action',
+          seconds: r1(isLine ? lineChars(b.line) / p.charsPerSecond : p.actionSeconds),
+          speaker: isLine ? b.speaker : undefined,
+          delivery: isLine ? (b.delivery ?? '') : undefined,
+          text: isLine ? b.line : b.action,
+        };
+      }),
+    }));
+    eps.set(ep.ep, { ep: ep.ep, targetSeconds: ep.targetSeconds, scenes });
+  }
+  return eps;
+}
+
+export const segSeconds = (segment) => r1((segment?.cuts ?? []).reduce((n, c) => n + (c?.seconds ?? 0), 0));
+
+/* ------------------------------------------------------------------ */
+/* stats                                                               */
+/* ------------------------------------------------------------------ */
+
+/** 报告与质量门共用的确定性统计。script 是硬前提——分镜离开剧本没有意义。 */
+export function computeStats(board, script) {
+  const params = paramsOf(board);
+  const expanded = expandScript(script);
   const episodes = [];
-  const batchKey2Id = new Map();
-  let batchCounter = 0;
+  const batches = new Map(); // sceneId|lighting → 生成批次
+  const dialogue = [];       // 配音对齐单：段 × 分镜 × 说话人 × 台词
 
-  function nextBatch(sceneId, lighting) {
-    const key = `${sceneId}__${lighting}`;
-    if (!batchKey2Id.has(key)) {
-      batchCounter += 1;
-      batchKey2Id.set(key, `B${batchCounter}`);
-    }
-    return batchKey2Id.get(key);
-  }
-
-  // 光照优先级：剧本该场指定（且美术已登记）> 美术场景第一个状态 > '默认'
-  function resolveLighting(sceneId, scriptLighting) {
-    const sm = ctx.sceneMap[sceneId];
-    if (!sm || !sm.lighting.length) return '默认';
-    if (scriptLighting && sm.lighting.some((l) => l.state === scriptLighting)) return scriptLighting;
-    return sm.lighting[0].state;
-  }
-
-  for (const ep of script.episodes || []) {
-    const shots = [];
-    let shotSeq = 0;
-
-    // 本集角色出场顺序 → 稳定 speaker ID (S1, S2...)（H3 要求跨镜头稳定）
-    const epCharOrder = [];
-    for (const scene of ep.scenes || []) for (const c of (scene.characters || [])) if (!epCharOrder.includes(c)) epCharOrder.push(c);
-    const epSpeakerMap = new Map(epCharOrder.map((c, i) => [c, `(S${i + 1})`]));
-
-    for (const scene of ep.scenes || []) {
-      const sceneId = scene.sceneId || scene.id;
-      const sceneChars = scene.characters || [];
-      const flow = scene.flow || [];
-
-      flow.forEach((beat, beatIndex) => {
-        // 剧本 beat 无顶层 kind 字段：action/line/vo 由存在字段推断
-        const kind = (beat.kind === 'vo' || beat.kind === 'voiceover') ? 'vo'
-          : (beat.action != null ? 'action' : 'dialogue');
-        shotSeq += 1;
-        const shotId = `E${pad(ep.ep, 2)}S${pad(shotSeq, 3)}`;
-
-        // 时长沙盘：动作节拍=基础秒数；台词/心声=字数/语速（与 novel-script 同模型，确保单集时长贴合）
-        let dur;
-        if (kind === 'action') dur = params.actionSeconds;
-        else dur = Math.max(params.shotSecondsFloor, Math.ceil((lineChars(beat.line) / params.charsPerSecond) * 10) / 10);
-
-        // 景别默认（模型可覆盖）：由 beat 类型与在场人数推断
-        let shotType;
-        if (kind === 'vo') shotType = '特写';
-        else if (kind === 'dialogue') shotType = sceneChars.length >= 3 ? '中景' : (sceneChars.length === 2 ? '过肩' : '近景');
-        else shotType = sceneChars.length >= 3 ? '全景' : (sceneChars.length === 2 ? '中景' : '近景');
-
-        const onScreen = kind !== 'vo'; // 心声默认不把说话人放进画面
-        const shot = {
-          shotId,
-          ep: ep.ep,
-          sceneId,
-          lighting: resolveLighting(sceneId, scene.lighting),
-          characters: sceneChars.slice(),
-          props: scene.props || [],
-          shotType,
-          camera: '固定机位',
-          durationSec: dur,
-          sourceBeat: { sceneNo: (ep.scenes.indexOf(scene)) + 1, beatNo: beatIndex + 1 },
-          beatKind: kind,
-          onScreen,
-          action: kind === 'action' ? (beat.action || '') : '',
-          line: kind === 'vo' ? (beat.line || '') : (kind === 'dialogue' ? (beat.line || '') : ''),
-          speaker: (kind !== 'action' && beat.speaker) ? beat.speaker : null,
-          prompt: '',
-          negativePrompt: '',
-          // ── 首帧图 / 视频 ComfyUI 工作流专用字段 ──
-          splitPrompt: '',          // 纯文本首帧提示词（可直接复制进 Krea2 文生图/图生图）
-          refImagePaths: [],        // 本镜引用的人物角色图路径（来自 cast.json，供 H3 I2VA 与首帧图生图复用）
-          continuity: null,         // 连续性状态块（P0-3）：角色服装/状态、道具状态、场景光照，跨镜比对用；autofill 时注入骨架
-          direction: null,          // 视觉导演块（Iteration 5）：构图/主体/前中后景/镜头/焦点/情绪/色调；autofill 时注入确定性骨架
-          firstFrameCopyBlock: '',  // 可直接复制粘贴到 Krea2 ComfyUI 的首帧出图整块
-          batch: nextBatch(sceneId, resolveLighting(sceneId, scene.lighting)),
-          warnings: [],
-          complexity: scoreComplexity({ kind, sceneChars, beat, shotType, camera: '固定机位', props: scene.props || [] }),
-          note: kind === 'vo' ? '心声/画外音：可不放说话人入画，仅给表情或空镜' : ''
-        };
-
-        // 把复杂度评分里的 warnings 合并进镜头级 warnings（逗号串/非动作镜提示）
-        const cmp = shot.complexity;
-        if (cmp && Array.isArray(cmp.warnings)) shot.warnings.push(...cmp.warnings);
-
-        if (autofill && ctx) autofillShot(shot, ctx, params, epSpeakerMap);
-        shots.push(shot);
+  for (const ep of board?.episodes ?? []) {
+    const sEp = expanded.get(ep.ep);
+    let total = 0;
+    let cutCount = 0;
+    let withLines = 0;
+    for (const seg of ep?.segments ?? []) {
+      const scene = sEp?.scenes?.[seg.sceneIndex - 1];
+      const secs = segSeconds(seg);
+      total += secs;
+      let segHasLine = false;
+      (seg?.cuts ?? []).forEach((cut, ci) => {
+        cutCount++;
+        if (!scene) return;
+        const [from, to] = cut.beats ?? [];
+        for (const b of scene.beats.slice((from ?? 1) - 1, to ?? 0)) {
+          if (b.kind !== 'line') continue;
+          segHasLine = true;
+          dialogue.push({ segment: seg.id, cut: ci + 1, ep: ep.ep, speaker: b.speaker, line: b.text, seconds: b.seconds });
+        }
       });
-    }
-
-    const targetSeconds = sumShotSeconds(shots);
-    episodes.push({
-      ep: ep.ep,
-      targetSeconds: Math.round(targetSeconds * 10) / 10,
-      shots
-    });
-  }
-
-  return episodes;
-}
-
-function sumShotSeconds(shots) { return shots.reduce((a, s) => a + (s.durationSec || 0), 0); }
-
-// 镜头复杂度评分（确定性，不依赖模型）：用于判断"1 beat 是否该拆成多镜"。
-// 评分项：人数(互动) / 动作数 / 道具交互 / 情绪变化 / 镜头运动 / 空间变化。
-// 评分器与拆镜器共用同一把尺子：recommendSplit 只在「动作镜 + ≥2 个句号分句 + score≥6」时置 true，
-// 保证"推荐可拆"必然"拆得动"（拆镜器同样只拆动作镜、只按句号分句），同时过滤掉简单建立镜
-// （如"浓雾把栈桥吃得只剩三步远。梆子声从岸上飘过来…"单角色无动作的 2 分句镜，score 低，不推荐拆）。
-// 逗号串成的连续动作（如"拿起手机，看了一眼消息，脸色骤变"）不再计入可拆分句，
-// 改为通过 warnings 提示人工处理，避免"提示了却拆不动"。
-function scoreComplexity({ kind, sceneChars, beat, shotType, camera, props }) {
-  let score = 0;
-  const n = sceneChars.length;
-  if (n >= 2) score += 2;          // 多人互动
-  else if (n === 1) score += 1;    // 单角色在场
-
-  const actionText = (kind === 'action' ? (beat.action || '') : (beat.line || ''));
-
-  // 拆镜器可拆的分句：仅按句号/分号切（与 cmdSplit 一致，不含逗号）
-  const splitClauses = String(actionText).split(/[。；;]/).map(s => s.trim()).filter(Boolean);
-  // 逗号串标志：同一句号段内若存在逗号，说明是"逗号串成的连续动作"，拆镜器无法拆
-  const hasCommaRun = /[，,]/.test(actionText);
-
-  // 复杂度评分：沿用含逗号的全部分句（用于展示镜头繁忙程度）
-  const clauses = String(actionText).split(/[。；;，,]/).map(s => s.trim()).filter(Boolean);
-  const actionCount = Math.max(0, clauses.length - 1); // 1 段不加分，2 段 +1，3 段 +2 …
-  score += Math.min(actionCount, 4); // 动作连续变化，封顶 +4
-
-  if (props && props.length) score += 1; // 道具交互
-
-  // 情绪变化：动作文本含情绪/表情/脸色等线索
-  if (/表情|脸色|神情|情绪|惊讶|震惊|怒|悲|喜|慌|愣|怔|变色|骤变/.test(actionText)) score += 1;
-
-  if (camera && camera !== '固定机位') score += 1; // 镜头运动
-
-  // 空间变化：走向/转身/离开/走近/环顾等位移
-  if (/走[向过]|转身|离开|走近|环顾|四下|迈步|跨[出过]|挪[到动]/.test(actionText)) score += 2;
-
-  let level = 'simple';
-  if (score >= 7) level = 'high';
-  else if (score >= 4) level = 'normal';
-
-  // recommendSplit 与拆镜器对齐（能拆才推荐），同时保留复杂度语义（过滤简单建立镜）：
-  // 仅「动作镜 + ≥2 个句号分句 + score≥6」才推荐拆镜
-  const recommendSplit = kind === 'action' && splitClauses.length >= 2 && score >= 6;
-  // 逗号串提示：本可算复杂但拆镜器拆不动，交给人工处理
-  const warnings = [];
-  if (recommendSplit === false && kind === 'action' && hasCommaRun && splitClauses.length < 2) {
-    warnings.push('逗号串成的连续动作，拆镜器无法自动拆分；如需拆镜请改为句号分句或人工处理');
-  } else if (kind !== 'action' && score >= 7) {
-    warnings.push('非动作镜复杂度偏高，但拆镜器仅拆动作镜，不自动拆分');
-  }
-
-  return { score, level, recommendSplit, splitClauses, warnings };
-}
-
-// seed 与 split 共用的 autofill：把结构化字段拼成可直接复制的提示词块。
-function autofillShot(shot, ctx, params, epSpeakerMap) {
-  shot.direction = composeDirection(shot, ctx);  // 视觉导演骨架（Iteration 5）
-  shot.prompt = composePrompt(shot, ctx, params);
-  shot.negativePrompt = composeNegative(shot, ctx);
-  shot.splitPrompt = composeSplitPrompt(shot, ctx, params);
-  shot.refImagePaths = composeRefImages(shot, ctx);
-  shot.continuity = composeContinuity(shot, ctx);
-  shot.firstFrameCopyBlock = composeFirstFrameCopyBlock(shot, ctx, params);
-  if (params.promptFormat !== 'legacy') {
-    shot.h3 = composeH3(shot, ctx, params, epSpeakerMap || new Map());
-    shot.h3CopyBlock = composeH3CopyBlock(shot, params);
-  }
-}
-
-// 把复杂动作镜（complexity.recommendSplit 或指定 --shot）按分句拆成多条子镜。
-// 严守红线：① 所有子镜共享同一 sourceBeat（保证 G1 beat 覆盖门仍通过）；
-//           ② shotId 加小写后缀避免与 G2 唯一/格式门冲突；③ 时长按段数均分。
-function cmdSplit(args) {
-  const { pos, opts } = parseArgs(args);
-  const p = pos[0];
-  if (!p) { console.error('用法: split <storyboard.json> [--shot E01S001 | --auto] [--cast --art --outline] [--autofill] [--out 路径]'); process.exit(2); }
-  if (!opts.shot && !opts.auto) { console.error('需指定 --shot <shotId> 或 --auto（拆所有 recommendSplit 动作镜）'); process.exit(2); }
-  const doc = readDoc(p);
-  const ctx = resolveCtx(opts);
-  const params = paramsOf(doc);
-  if (opts['prompt-format']) params.promptFormat = opts['prompt-format'];
-  if (opts['h3-mode']) params.h3Mode = opts['h3-mode'];
-  const autofill = !!opts.autofill;
-  const target = opts.shot || null;
-
-  let splitCount = 0;
-  for (const ep of doc.episodes || []) {
-    const newShots = [];
-    for (const shot of ep.shots || []) {
-      const want = target ? (shot.shotId === target) : (shot.complexity && shot.complexity.recommendSplit);
-      if (!want || shot.beatKind !== 'action') { newShots.push(shot); continue; }
-      const clauses = String(shot.action || '').split(/[。；;]/).map(s => s.trim()).filter(Boolean);
-      if (clauses.length < 2) { newShots.push(shot); continue; } // 单段不拆
-      const splitFloor = params.splitSecondsFloor || 1.0;
-      const perRaw = (shot.durationSec || clauses.length) / clauses.length;
-      // 用更低的 splitFloor 判断能否拆：子镜各 ≥ splitFloor 即可（G4 对 split 镜也用此下限）
-      if (perRaw < splitFloor) { newShots.push(shot); continue; }
-      const per = Math.max(splitFloor, Math.round(perRaw * 10) / 10); // 每段至少 splitFloor
-      clauses.forEach((cl, i) => {
-        const suffix = String.fromCharCode(97 + i); // a,b,c…
-        const isLast = i === clauses.length - 1;
-        const sub = {
-          ...shot,
-          shotId: `${shot.shotId}${suffix}`,
-          action: cl,
-          durationSec: isLast
-            ? Math.round(Math.max(splitFloor, ((shot.durationSec || clauses.length) - per * (clauses.length - 1))) * 10) / 10
-            : per,
-          split: true, // 标记由 split 产生的子镜，G4 用 splitFloor 而非 shotSecondsFloor
-          sourceBeat: { ...shot.sourceBeat }, // 关键：沿用原 beat，守住覆盖率门
-          complexity: scoreComplexity({ kind: 'action', sceneChars: shot.characters, beat: { action: cl }, shotType: shot.shotType, camera: shot.camera, props: shot.props })
-        };
-        if (autofill && ctx) autofillShot(sub, ctx, params, new Map());
-        newShots.push(sub);
-      });
-      splitCount += 1;
-    }
-    ep.shots = newShots;
-  }
-
-  const outPath = opts.out ? resolve(opts.out) : resolve(process.cwd(), `${slugify(doc.source || 'storyboard')}-storyboard.split.json`);
-  writeFileSync(outPath, JSON.stringify(doc, null, 2));
-  const stats = computeStats(doc);
-  console.error(`✓ 已拆分 ${splitCount} 条复杂镜 → ${outPath}`);
-  console.error(`  现共 ${stats.totalShots} 条镜头 / 预估 ${fmtSec(stats.totalSeconds)}s`);
-  console.error(`  提示：拆分后请重新跑 validate 确认 G1/G2 仍通过，再 export 出 Prompt 包`);
-  return outPath;
-}
-
-
-// 首帧提示词合成（autofill）：场景光照 + 在场角色形象 + 道具状态 + 景别 + 风格
-function composePrompt(shot, ctx, params) {
-  const parts = [];
-  const sm = ctx.sceneMap[shot.sceneId];
-  if (sm && sm.lighting.length) {
-    const lit = sm.lighting.find(l => l.state === shot.lighting) || sm.lighting[0];
-    parts.push(lit.prompt);
-  } else {
-    parts.push('cinematic interior setting');
-  }
-
-  if (shot.onScreen) {
-    for (const cid of shot.characters) {
-      const name = ctx.cidToName[cid];
-      const cast = name && ctx.nameToCast[name];
-      if (cast && cast.image && cast.image.prompt) {
-        const p = cast.image.prompt;
-        const slim = p.includes(' Three-quarter view') ? p.split(' Three-quarter view')[0] : p.slice(0, 400);
-        let seg = slim.trim().replace(/[.]+$/, '');
-        // Identity Lock：把不可变特征注入首帧，防止"第一镜一个脸、第二镜一个脸"
-        const anchors = (cast.identityAnchors && cast.identityAnchors.length) ? cast.identityAnchors : (cast.identity ? [cast.identity] : []);
-        if (anchors.length) seg += ', ' + anchors.join(', ');
-        // Wardrobe：展开角色服装（优先 continuity 指定的 wardrobeId，否则默认第一条）
-        const wId = shot.continuity && shot.continuity.characters && shot.continuity.characters[cid]
-          ? shot.continuity.characters[cid].wardrobe : null;
-        const wardrobe = (cast.wardrobe && cast.wardrobe.length)
-          ? (cast.wardrobe.find(w => w.id === wId) || cast.wardrobe[0]) : null;
-        if (wardrobe && wardrobe.prompt) seg += `, wearing ${wardrobe.prompt}`;
-        parts.push(seg);
-      }
-    }
-  } else {
-    parts.push('a face in shadow, thoughtful expression, not identified');
-  }
-
-  for (const pid of shot.props) {
-    const pm = ctx.propMap[pid];
-    if (pm && pm.states.length) parts.push(pm.states[0].prompt);
-  }
-
-  const en = SHOT_TYPES_EN[shot.shotType] || 'shot';
-  parts.push(`${en}, cinematic composition, ${params.style} style, Republican-era China, coherent lighting`);
-
-  // 视觉导演块（Iteration 5）：direction 存在时追加构图/镜头/焦点句，让首帧从"拼接"升级为"导演"。
-  // 没有 direction（旧 storyboard.json 或手动 seed 未 autofill）时保持现状，向后兼容。
-  const d = shot.direction;
-  if (d) {
-    const dirParts = [];
-    if (d.composition) dirParts.push(`${d.composition} composition`);
-    if (d.cameraAngle) dirParts.push(`${d.cameraAngle} camera angle`);
-    if (d.lens) dirParts.push(`${d.lens} lens`);
-    // visualFocus 可能是中文角色名（seed 时只有中文名）；英文 prompt 不得含中文，故中文时改写为 the main subject
-    const focus = (d.visualFocus && !hasCJK(d.visualFocus)) ? d.visualFocus : 'the main subject';
-    if (d.visualFocus) dirParts.push(`visual focus on ${focus}`);
-    if (d.emotion && d.emotion !== 'neutral') dirParts.push(`${d.emotion} expression`);
-    if (d.colorMood) dirParts.push(`${d.colorMood}`);
-    if (dirParts.length) parts.push(dirParts.join(', '));
-  }
-  return parts.join('. ') + '.';
-}
-
-function composeNegative(shot, ctx) {
-  const sm = ctx.sceneMap[shot.sceneId];
-  if (sm && sm.negativePrompt) return sm.negativePrompt;
-  return 'people, crowds, extra fingers, malformed hands, text, watermark, signature, oversaturated';
-}
-
-// 首帧提示词（纯文本，可直接复制给 ComfyUI 文生图 / 图生图节点）。
-// 与 prompt 同源，去掉句尾标点、压缩为单行，便于粘贴。
-function composeSplitPrompt(shot, ctx, params) {
-  const base = composePrompt(shot, ctx, params);
-  return base.replace(/\s+/g, ' ').replace(/[.\s]+$/, '').trim();
-}
-
-// 本镜要用到的人物角色图路径（来自 cast.json，供首帧图生图 + H3 I2VA 复用）。
-// 按景别推荐最贴合的参考图：特写→portrait / 中景→halfBody / 全景→fullBody / 侧身→side；
-// 所选缺失时降级 portrait → path → 占位符（sheet 是提示词文本不是路径，永不进 refImagePaths），绝不阻断生成。
-const SHOT_REF_PREF = [
-  { types: ['特写', '大特写'], pick: ['portrait'] },
-  { types: ['近景', '过肩'], pick: ['portrait', 'halfBody'] },
-  { types: ['中景'], pick: ['halfBody', 'portrait'] },
-  { types: ['全景', '远景', '大远景'], pick: ['fullBody', 'halfBody', 'portrait'] },
-  { types: ['侧拍', '侧面'], pick: ['side', 'portrait'] }
-];
-function composeRefImages(shot, ctx) {
-  const paths = [];
-  const pref = SHOT_REF_PREF.find(r => r.types.includes(shot.shotType)) || { pick: ['portrait'] };
-  for (const cid of shot.characters) {
-    const name = ctx.cidToName[cid];
-    const cast = name && ctx.nameToCast[name];
-    const img = cast && cast.image;
-    let chosen = null;
-    for (const key of pref.pick) { if (img && img[key]) { chosen = img[key]; break; } }
-    if (!chosen && img && img.portrait) chosen = img.portrait;       // 降级 portrait（干净单视角图）
-    if (!chosen && img && img.path) chosen = img.path;               // 再降级 path（旧字段）
-    if (chosen) paths.push(chosen);
-    else if (name) paths.push(`【角色图:${name}】`);
-    else paths.push(`【角色图:${cid}】`);
-  }
-  return [...new Set(paths)];
-}
-
-// 连续性状态块（P0-3）：给出每镜的"状态快照"骨架，供 novel-project 跨镜状态机比对。
-// 取值优先来自角色/道具/场景当前设定；缺失项留空字符串，由人工在 seed 后精修。
-// continuity 不代表最终生成结果，而是"这一镜应有的连续性约束"。
-function composeContinuity(shot, ctx) {
-  const characters = {};
-  for (const cid of shot.characters) {
-    const name = ctx.cidToName[cid];
-    const cast = name && ctx.nameToCast[name];
-    characters[cid] = {
-      name: name || cid,
-      wardrobe: (cast && cast.wardrobe) || '',      // 服装状态（如 W01 藏青学生装）；缺省留空待补
-      emotion: (cast && cast.emotion) || '',        // 情绪（如 angry/calm）；缺省留空
-      state: 'on_screen',                           // 在场状态：on_screen / off_screen / held
-      position: ''                                  // 画面位置（如 left/center/right）；缺省留空
-    };
-  }
-  const props = {};
-  for (const pid of shot.props) {
-    const pm = ctx.propMap[pid];
-    props[pid] = {
-      name: (pm && pm.name) || pid,
-      state: (pm && pm.states && pm.states[0] && pm.states[0].state) || ''  // 当前道具状态（如 held/on_table），art.json 的字段名是 state
-    };
-  }
-  const sm = ctx.sceneMap[shot.sceneId];
-  const lit = (sm && sm.lighting && sm.lighting.find(l => l.state === shot.lighting)) || (sm && sm.lighting && sm.lighting[0]);
-  const scene = {
-    lighting: shot.lighting || (lit && lit.state) || '',
-    weather: (sm && sm.weather) || '',
-    time: (sm && sm.time) || ''
-  };
-  return { characters, props, scene };
-}
-
-// 视觉导演块（Visual Direction，Iteration 5）：给每镜一个确定性导演骨架，
-// 让"首帧 Prompt"从"拼接器"升级为"导演"——明确构图/主体/前中后景/镜头/焦点/情绪/色调。
-// 设计原则（守红线）：seed 用确定性逻辑填骨架，模型可选精修；composePrompt 在 direction 存在时
-// 追加构图/镜头/焦点句，没有时保持现状（向后兼容旧 storyboard.json）。
-function composeDirection(shot, ctx) {
-  const sm = ctx.sceneMap[shot.sceneId];
-  const lit = (sm && sm.lighting && sm.lighting.length)
-    ? (sm.lighting.find(l => l.state === shot.lighting) || sm.lighting[0]) : null;
-  const litPrompt = (lit && lit.prompt) || '';
-  const lp = litPrompt.toLowerCase();
-
-  // framing ← shotType（中文景别映射到英文取景）
-  const framing = SHOT_TYPES_EN[shot.shotType] || 'shot';
-
-  // 情绪 ← 动作文本情绪词表
-  const actionText = (shot.action || shot.line || '');
-  let emotion = 'neutral';
-  for (const [kw, e] of EMOTION_MAP) if (actionText.includes(kw)) { emotion = e; break; }
-
-  // 姿态 ← 动作空间/姿态词表
-  let pose = 'standing';
-  for (const [kw, p] of POSE_MAP) if (actionText.includes(kw)) { pose = p; break; }
-
-  // 视觉焦点 ← 动作主语（动作文本第一个角色名）或首个在场角色
-  let visualFocus = shot.characters[0] ? (ctx.cidToName[shot.characters[0]] || shot.characters[0]) : '';
-  for (const cid of shot.characters) {
-    const name = ctx.cidToName[cid];
-    if (name && actionText.includes(name)) { visualFocus = name; break; }
-  }
-
-  // 主体优先级 ← 在场角色顺序（动作镜按动作文本主语前置）
-  const subjectPriority = shot.characters.map(c => ctx.cidToName[c] || c);
-
-  // 色调 ← 光照/天气
-  let colorMood = 'natural muted tones';
-  if (lp.includes('rain')) colorMood = 'cool desaturated, rain-wet surfaces';
-  else if (lp.includes('night') || lp.includes('昏') || lp.includes('暮')) colorMood = 'low-key, warm artificial light';
-  else if (lp.includes('morning') || lp.includes('晨') || lp.includes('雾') || lp.includes('mist')) colorMood = 'soft diffused, pale cool light';
-  else if (lp.includes('fire') || lp.includes('暖') || lp.includes('灯')) colorMood = 'warm amber tones';
-
-  return {
-    framing,
-    cameraAngle: 'eye-level',
-    lens: shot.shotType.includes('特写') ? '85mm' : '35mm',
-    subjectPriority,
-    composition: 'rule-of-thirds',
-    foreground: '',      // 需模型按构图精修；留空待补
-    midground: shot.characters.length ? subjectPriority.join(' and ') : '',
-    background: sm ? (sm.name || '') : '',
-    visualFocus: visualFocus || (subjectPriority[0] || ''),
-    pose,
-    emotion,
-    colorMood
-  };
-}
-
-// 首帧出图整块（可直接复制粘贴到 Krea2 ComfyUI 工作流）：
-// 正向提示词 + 反向提示词，分两段标注，零依赖即可用。
-function composeFirstFrameCopyBlock(shot, ctx, params) {
-  const pos = composeSplitPrompt(shot, ctx, params);
-  const neg = composeNegative(shot, ctx);
-  const refNote = shot.refImagePaths && shot.refImagePaths.length
-    ? `\n\n[参考图] ${shot.refImagePaths.join(' | ')}\n（将上述角色图作为图生图/角色一致性参考传入 Krea2 工作流）`
-    : '';
-  return `=== 正向提示词 ===\n${pos}\n\n=== 反向提示词 ===\n${neg}${refNote}`;
-}
-
-// ── H3 (MiniMax H3) 视频提示词合成 ─────────────────────────
-// 每条 shot ＝ 一个 H3 视频片段，输出三段式结构：
-//   mode / integrated_multimodal_description / overall_soundscape / non_diegetic_music
-// 遵循 h3-prompt-writing 规范：镜头头 [Shot 1] + 风格 + 景别；角色用 (S1) 稳定 ID；
-// 台词用 <d>[Chinese] ... </d>；VO 用 off-screen voiceover + 闭唇；机位映射到 H3 运镜词。
-function h3CameraClause(shot) {
-  const c = (shot.camera || '固定机位').trim();
-  if (CAMERA_H3[c]) return CAMERA_H3[c];
-  // 未命中则按景别给一个稳妥默认
-  return ['特写', '大特写'].includes(shot.shotType)
-    ? 'The camera holds a static close shot.'
-    : 'The camera holds a static shot.';
-}
-
-function h3Soundscape(shot, ctx, params) {
-  const sm = ctx.sceneMap[shot.sceneId];
-  const sceneName = sm ? sm.name : 'the location';
-  const action = shot.action || shot.line || '';
-
-  // 环境底噪：与光照/动作粗略对应（H3 规范提示词全英文，不内嵌中文场景名）
-  let ambience = 'Ambient room tone continues';
-  if (sm && sm.lighting.length) {
-    const lit = sm.lighting.find(l => l.state === shot.lighting) || sm.lighting[0];
-    const lp = (lit.prompt || '').toLowerCase();
-    if (lp.includes('rain')) ambience = 'Rain taps against the windows';
-    else if (lp.includes('wind') || lp.includes('storm')) ambience = 'Wind passes through the space';
-    else if (lp.includes('night')) ambience = 'Quiet night ambience';
-    else if (lp.includes('fire')) ambience = 'A fire crackles in the hearth';
-  }
-
-  // 动作音效：启发式匹配
-  const sfx = [];
-  for (const [kw, s] of SFX_HINTS) if (action.includes(kw)) sfx.push(s);
-  const sfxText = sfx.length ? '; ' + sfx.join('; ') : '';
-
-  // 台词/心声：叠加上的人声
-  let voice = '';
-  if (shot.beatKind !== 'action' && shot.line) {
-    voice = shot.beatKind === 'vo' ? '; the off-screen voiceover is clear and close' : '; a natural speaking voice carries the line';
-  }
-  return `${ambience}${sfxText}${voice}.`;
-}
-
-function composeH3(shot, ctx, params, epSpeakerMap) {
-  const style = params.h3Style || 'Live-action, cinematic';
-  const mode = params.h3Mode === 't2va' ? 'T2VA' : 'I2VA';
-  const en = SHOT_TYPES_EN[shot.shotType] || 'shot';
-  const sm = ctx.sceneMap[shot.sceneId];
-  const litPrompt = (sm && sm.lighting.length)
-    ? (sm.lighting.find(l => l.state === shot.lighting) || sm.lighting[0]).prompt
-    : 'an interior setting';
-
-  // 在场角色形象 + 稳定 ID
-  let charClause = '';
-  if (shot.onScreen && shot.characters.length) {
-    const parts = [];
-    for (const cid of shot.characters) {
-      const name = ctx.cidToName[cid];
-      const sid = epSpeakerMap.get(cid) || '';
-      const cast = name && ctx.nameToCast[name];
-      let look = '';
-      if (cast && cast.image && cast.image.prompt) {
-        const p = cast.image.prompt;
-        look = (p.includes(' Three-quarter view') ? p.split(' Three-quarter view')[0] : p.slice(0, 280)).trim().replace(/[.]+$/, '');
-      }
-      parts.push(`${name} ${sid}, ${look}`.replace(/\s+/g, ' ').trim());
-    }
-    charClause = parts.join('; ') + '. ';
-  } else {
-    charClause = 'A face in shadow, thoughtful expression, not identified. ';
-  }
-
-  const cameraClause = h3CameraClause(shot);
-
-  // 主体内容：动作 / 对白 / 心声
-  let body;
-  if (shot.beatKind === 'vo') {
-    const lead = shot.characters.length ? `${ctx.cidToName[shot.characters[0]]} ${epSpeakerMap.get(shot.characters[0]) || ''}` : 'A character';
-    const gender = 'their';
-    body = `${lead} says in an off-screen voiceover: <d>[Chinese] ${shot.line || ''}</d> while ${gender} lips remain completely closed. `;
-  } else if (shot.beatKind === 'dialogue') {
-    const lead = shot.characters.length ? `${ctx.cidToName[shot.characters[0]]} ${epSpeakerMap.get(shot.characters[0]) || ''}` : 'A character';
-    body = `${lead} says: <d>[Chinese] ${shot.line || ''}</d> `;
-  } else {
-    // 动作叙事必须是英文（H3 规范）；剧本动作常为中文，含中文时退化为安全英文占位并标注让用户补
-    const act = shot.action || '';
-    if (act && !hasCJK(act)) body = `${act} `;
-    else body = 'The scene continues with subtle natural motion. ';
-  }
-
-  // I2VA：首帧图 + 角色参考图驱动。开头插首帧引用句，Shot 1 里点明与参考图一致。
-  let refIntro = '';
-  let firstFrameAnchor = '';
-  if (mode === 'I2VA') {
-    refIntro = 'For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.\n\n';
-    // 若本镜有角色参考图，明确"角色形象与参考图一致"，保证抽卡时角色不漂移
-    if (shot.refImagePaths && shot.refImagePaths.length) {
-      firstFrameAnchor = 'The character appearance, clothing, and facial features exactly match the supplied character reference image(s). ';
-    }
-  }
-
-  const desc = `[Shot 1] ${style}, a ${en} frames ${litPrompt}. ${firstFrameAnchor}${charClause}${cameraClause} ${body}`.replace(/\s+/g, ' ').trim();
-  const sound = h3Soundscape(shot, ctx, params);
-  const music = params.h3Music || 'A soft, understated background score at a slow tempo that supports the scene mood.';
-  const h3 = { mode, integrated_multimodal_description: desc, overall_soundscape: sound, non_diegetic_music: music };
-
-  // I2VA 时把首帧引用句与角色图信息一并带出，便于直接喂给 H3 ComfyUI 工作流
-  if (mode === 'I2VA') {
-    h3.firstFrameReference = '<Picture 1> = 本镜首帧图（由 Krea2 生成）';
-    if (shot.refImagePaths && shot.refImagePaths.length) {
-      h3.characterReference = shot.refImagePaths.join(' | ');
-    }
-  }
-  return h3;
-}
-
-// H3 视频生成整块（可直接复制粘贴到 MiniMax H3 ComfyUI 工作流）：
-// 首帧引用句(仅 I2VA) + 三段式字段，分块标注，零依赖即可用。
-function composeH3CopyBlock(shot, params) {
-  const h3 = shot.h3;
-  if (!h3) return '';
-  const parts = [];
-  const mode = h3.mode || 'T2VA';
-  if (mode === 'I2VA') {
-    parts.push('=== 参考图(传入 H3 工作流) ===');
-    parts.push('首帧图(Picture 1): 本镜首帧图文件（由 Krea2 生成）');
-    if (h3.characterReference) parts.push(`角色参考图: ${h3.characterReference}`);
-    parts.push('');
-    parts.push('=== 首帧引用句(粘贴到提示词开头) ===');
-    parts.push('For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.');
-    parts.push('');
-  }
-  parts.push('=== integrated_multimodal_description ===');
-  parts.push(h3.integrated_multimodal_description);
-  parts.push('');
-  parts.push('=== overall_soundscape ===');
-  parts.push(h3.overall_soundscape);
-  parts.push('');
-  parts.push('=== non_diegetic_music ===');
-  parts.push(h3.non_diegetic_music);
-  return parts.join('\n');
-}
-
-// ── 统计 ──────────────────────────────────────────────────
-function computeStats(doc) {
-  const params = paramsOf(doc);
-  let totalShots = 0;
-  let totalSec = 0;
-  const batches = new Map();
-  for (const ep of doc.episodes || []) {
-    for (const s of ep.shots || []) {
-      totalShots += 1;
-      totalSec += s.durationSec || 0;
-      if (s.batch) {
-        if (!batches.has(s.batch)) batches.set(s.batch, []);
-        batches.get(s.batch).push(s.shotId);
-      }
-    }
-  }
-  return {
-    episodes: (doc.episodes || []).length,
-    totalShots,
-    totalSeconds: Math.round(totalSec * 10) / 10,
-    avgShotSec: totalShots ? Math.round((totalSec / totalShots) * 10) / 10 : 0,
-    batchCount: batches.size,
-    batches: Array.from(batches.entries()).map(([id, ids]) => ({ id, count: ids.length, shotIds: ids }))
-  };
-}
-
-// ── 质量门（13 道，确定性）──────────────────────────────
-// 返回 { gates:[{id,name,ok,info}], passed, total, skipped }
-function gateReport(doc, ctx) {
-  const params = paramsOf(doc);
-  const gates = [];
-  const push = (id, name, ok, info) => gates.push({ id, name, ok, info: info || '' });
-
-  // 建立脚本 beat 索引（用于覆盖率与角色一致性）
-  const scriptBeats = []; // {ep, sceneNo, beatNo, kind, chars}
-  if (ctx && ctx.script) {
-    for (const ep of ctx.script.episodes || []) {
-      (ep.scenes || []).forEach((sc, si) => {
-        (sc.flow || []).forEach((b, bi) => {
-          scriptBeats.push({ ep: ep.ep, sceneNo: si + 1, beatNo: bi + 1, kind: b.kind, chars: sc.characters || [] });
-        });
-      });
-    }
-  }
-  const sbMap = new Map();
-  for (const b of scriptBeats) sbMap.set(`${b.ep}:${b.sceneNo}:${b.beatNo}`, b);
-
-  const allShots = [];
-  for (const ep of doc.episodes || []) for (const s of ep.shots || []) allShots.push(s);
-
-  // G1 覆盖率：每个剧本 beat 都有对应 shot
-  if (ctx && ctx.script) {
-    let missing = 0;
-    const covered = new Set();
-    for (const s of allShots) {
-      if (s.sourceBeat && s.sourceBeat.sceneNo != null) covered.add(`${s.ep}:${s.sourceBeat.sceneNo}:${s.sourceBeat.beatNo}`);
-    }
-    for (const key of sbMap.keys()) if (!covered.has(key)) missing += 1;
-    push('coverage', '剧本 beat 全覆盖', missing === 0, missing ? `缺 ${missing} 条 beat 的分镜` : `共 ${sbMap.size} 条 beat 全有分镜`);
-  } else {
-    push('coverage', '剧本 beat 全覆盖', true, '未提供 --script，跳过');
-  }
-
-  // G2 shotId 唯一且符合 E{nn}S{nnn}
-  {
-    const idset = new Set();
-    let dup = 0, bad = 0;
-    for (const s of allShots) {
-      if (!/^E\d{2,}S\d{3,}[a-z]?$/.test(s.shotId || '')) bad += 1;
-      if (idset.has(s.shotId)) dup += 1; idset.add(s.shotId);
-    }
-    push('shot-id', 'shotId 唯一且格式合规', dup === 0 && bad === 0, `重复 ${dup} / 格式错 ${bad}`);
-  }
-
-  // G3 场景引用（需 --art）
-  if (ctx && ctx.art) {
-    let bad = 0; const ids = Object.keys(ctx.sceneMap);
-    for (const s of allShots) if (!ids.includes(s.sceneId)) bad += 1;
-    push('scene-ref', '场景 ID 在 art.json 存在', bad === 0, bad ? `${bad} 个镜头场景缺失` : '全部命中');
-  } else push('scene-ref', '场景 ID 在 art.json 存在', true, '未提供 --art，跳过');
-
-  // G4 光照状态注册（需 --art）
-  if (ctx && ctx.art) {
-    let bad = 0;
-    for (const s of allShots) {
-      const sm = ctx.sceneMap[s.sceneId];
-      if (!sm || !sm.lighting.some(l => l.state === s.lighting)) bad += 1;
-    }
-    push('lighting-ref', '光照状态在场景内注册', bad === 0, bad ? `${bad} 个镜头光照未注册` : '全部命中');
-  } else push('lighting-ref', '光照状态在场景内注册', true, '未提供 --art，跳过');
-
-  // G5 角色一致性：镜头角色 ⊆ 剧本该场角色（需 --script）
-  if (ctx && ctx.script) {
-    let bad = 0; const detail = [];
-    for (const s of allShots) {
-      if (!s.sourceBeat || s.sourceBeat.sceneNo == null) continue;
-      const key = `${s.ep}:${s.sourceBeat.sceneNo}:${s.sourceBeat.beatNo}`;
-      const sb = sbMap.get(key);
-      if (!sb) continue;
-      for (const c of (s.characters || [])) if (!(sb.chars).includes(c)) { bad += 1; detail.push(s.shotId); }
-    }
-    push('char-consistency', '镜头角色 ⊆ 剧本在场角色', bad === 0, bad ? `越界 ${bad} 处：${detail.slice(0, 5).join(',')}` : '一致');
-  } else push('char-consistency', '镜头角色 ⊆ 剧本在场角色', true, '未提供 --script，跳过');
-
-  // G6 时长：单镜在 [floor,cap]，单集总和贴近 script 目标（需 --script）
-  let durBad = 0;
-  for (const s of allShots) {
-    const d = s.durationSec || 0;
-    // split 子镜用更低的 splitSecondsFloor（允许短动作拍拆开），普通镜用 shotSecondsFloor
-    const floor = s.split ? (params.splitSecondsFloor || 1.0) : params.shotSecondsFloor;
-    if (d < floor || d > params.shotSecondsCap) durBad += 1;
-  }
-  let epBad = 0;
-  if (ctx && ctx.script) {
-    const scriptEp = new Map();
-    for (const ep of ctx.script.episodes || []) scriptEp.set(ep.ep, ep.targetSeconds);
-    for (const ep of doc.episodes || []) {
-      const tgt = scriptEp.get(ep.ep);
-      if (tgt != null) {
-        const diff = Math.abs((ep.targetSeconds || 0) - tgt) / tgt;
-        if (diff > params.tolerance) epBad += 1;
-      }
-    }
-  }
-  push('duration', '单镜时长合规 & 单集时长贴近', durBad === 0 && epBad === 0,
-    `单镜越界 ${durBad} / 单集越界 ${epBad}${ctx && ctx.script ? '' : '（单集比对需 --script）'}`);
-
-  // G7 景别枚举
-  {
-    let bad = 0;
-    for (const s of allShots) if (!SHOT_TYPES.includes(s.shotType)) bad += 1;
-    push('shot-type', '景别取值合法', bad === 0, bad ? `${bad} 个非法` : '全部合法');
-  }
-
-  // G8 机位非空
-  {
-    let bad = 0;
-    for (const s of allShots) if (!s.camera || !String(s.camera).trim()) bad += 1;
-    push('camera', '机位非空', bad === 0, bad ? `${bad} 个空` : '全部填写');
-  }
-
-  // G9 首帧提示词：非空 + 英文 + 不含角色中文名（--cast 越界检测）
-  {
-    let bad = 0, cjk = 0;
-    for (const s of allShots) {
-      if (!s.prompt || !String(s.prompt).trim()) { bad += 1; continue; }
-      if (hasCJK(s.prompt)) cjk += 1;
-      if (ctx && ctx.cast) {
-        for (const name of Object.keys(ctx.nameToCast)) {
-          if (String(s.prompt).includes(name)) { bad += 1; break; }
+      if (segHasLine) withLines++;
+      if (scene) {
+        const key = `${scene.sceneId}|${scene.lighting}`;
+        if (!batches.has(key)) {
+          batches.set(key, { sceneId: scene.sceneId, lighting: scene.lighting, segments: [], characters: new Set(), props: new Set() });
+        }
+        const batch = batches.get(key);
+        batch.segments.push(seg.id);
+        for (const cut of seg?.cuts ?? []) {
+          for (const c of cut.characters ?? []) batch.characters.add(c);
+          for (const pr of cut.props ?? []) batch.props.add(pr);
         }
       }
     }
-    push('prompt', '首帧提示词非空且英文', bad === 0 && cjk === 0, `空/越界 ${bad} / 含中文 ${cjk}`);
+    episodes.push({
+      ep: ep.ep,
+      target: sEp?.targetSeconds ?? 0,
+      segments: (ep?.segments ?? []).length,
+      cuts: cutCount,
+      totalSeconds: r1(total),
+      avgCutSeconds: cutCount ? r1(total / cutCount) : 0,
+      withLines,
+    });
   }
 
-  // G10 反向提示词：非空 + 英文
-  {
-    let bad = 0, cjk = 0;
-    for (const s of allShots) {
-      if (!s.negativePrompt || !String(s.negativePrompt).trim()) { bad += 1; continue; }
-      if (hasCJK(s.negativePrompt)) cjk += 1;
-    }
-    push('neg-prompt', '反向提示词非空且英文', bad === 0 && cjk === 0, `空 ${bad} / 含中文 ${cjk}`);
-  }
+  const totals = {
+    segments: episodes.reduce((n, e) => n + e.segments, 0),
+    cuts: episodes.reduce((n, e) => n + e.cuts, 0),
+    seconds: r1(episodes.reduce((n, e) => n + e.totalSeconds, 0)),
+    targetSeconds: episodes.reduce((n, e) => n + e.target, 0),
+    withLines: episodes.reduce((n, e) => n + e.withLines, 0),
+    avgCutSeconds: 0,
+  };
+  totals.avgCutSeconds = totals.cuts ? r1(totals.seconds / totals.cuts) : 0;
 
-  // G11 生成批次已分配
-  {
-    let bad = 0;
-    for (const s of allShots) if (!s.batch || !String(s.batch).trim()) bad += 1;
-    push('batch', '生成批次已分配', bad === 0, bad ? `${bad} 个未分配` : '全部分配');
-  }
-
-  // G12 心声（VO）镜头必须说明取景（onScreen=false 或 note 非空）
-  {
-    let bad = 0;
-    for (const s of allShots) {
-      if (s.beatKind === 'vo' && s.onScreen !== false && !(s.note && String(s.note).trim())) bad += 1;
-    }
-    push('vo-framing', 'VO 镜头取景已说明', bad === 0, bad ? `${bad} 个 VO 未说明` : '全部说明');
-  }
-
-  // G13 预警清单：多人近景/特写须预警；含人群词须预警
-  {
-    let bad = 0;
-    for (const s of allShots) {
-      const onScreenCount = s.onScreen === false ? 0 : (s.characters || []).length;
-      const hardType = ['特写', '近景'].includes(s.shotType);
-      const needWarn = (onScreenCount >= 3 && hardType);
-      const crowdHit = (s.prompt && CROWD_KEYWORDS.some(k => String(s.prompt).includes(k)));
-      const warns = s.warnings || [];
-      if (needWarn && warns.length === 0) bad += 1;
-      if (crowdHit && warns.length === 0) bad += 1;
-    }
-    push('warnings', '难点镜头已加预警', bad === 0, bad ? `${bad} 个难点缺预警` : '全部补齐');
-  }
-
-  // H3 视频提示词质量门（仅当存在 h3 字段时启用）
-  {
-    const h3Shots = allShots.filter(s => s.h3);
-    if (h3Shots.length === 0) {
-      push('h3-desc', 'H3 描述符合规范', true, '未生成 H3 提示词（legacy 模式），跳过');
-      push('h3-sound', 'H3 声景/配乐已填', true, '未生成 H3 提示词（legacy 模式），跳过');
-    } else {
-      // G14 h3-desc：非空 + [Shot N] 头 + 英文骨架(运镜+景别) + 台词镜含 <d>[（H3 允许中文：角色名/动作叙事/对话<d>[Chinese]）
-      let bad = 0, info = [];
-      for (const s of h3Shots) {
-        const d = s.h3.integrated_multimodal_description || '';
-        if (!d.trim()) { bad += 1; info.push(`${s.shotId}:空`); continue; }
-        if (!/\[Shot\s*\d+\]/.test(d)) { bad += 1; info.push(`${s.shotId}:缺[Shot]`); }
-        if (!/The camera/i.test(d)) { bad += 1; info.push(`${s.shotId}:缺运镜`); }
-        if (!/\bshot\b/i.test(d) && !/frames/i.test(d)) { bad += 1; info.push(`${s.shotId}:缺景别`); }
-        if ((s.beatKind === 'dialogue' || s.beatKind === 'vo') && !d.includes('<d>[')) { bad += 1; info.push(`${s.shotId}:台词缺<d>`); }
-      }
-      push('h3-desc', 'H3 描述符合规范', bad === 0, bad ? `${bad} 处异常：${info.slice(0, 5).join(',')}` : `${h3Shots.length} 条全部合规`);
-
-      // G15 h3-sound：overall_soundscape 与 non_diegetic_music 均非空
-      let bad2 = 0;
-      for (const s of h3Shots) {
-        if (!s.h3.overall_soundscape || !String(s.h3.overall_soundscape).trim()) bad2 += 1;
-        if (!s.h3.non_diegetic_music || !String(s.h3.non_diegetic_music).trim()) bad2 += 1;
-      }
-      push('h3-sound', 'H3 声景/配乐已填', bad2 === 0, bad2 ? `${bad2} 处缺失` : `${h3Shots.length} 条全部填写`);
-
-      // G16 h3-copy：可直接复制的 H3 文本块非空（供 ComfyUI 直接粘贴）
-      let bad3 = 0;
-      for (const s of h3Shots) if (!s.h3CopyBlock || !String(s.h3CopyBlock).trim()) bad3 += 1;
-      push('h3-copy', 'H3 复制块(可直接粘贴)已生成', bad3 === 0, bad3 ? `${bad3} 条缺失` : `${h3Shots.length} 条全部生成`);
-    }
-  }
-
-  // G17 首帧出图复制块非空（供 Krea2 ComfyUI 直接粘贴）
-  // 仅对已填 prompt 的镜头强制；纯空骨架（prompt 为空，待手工填）跳过，避免误伤未 autofill 的草稿。
-  {
-    let bad = 0, skipped = 0;
-    for (const s of allShots) {
-      if (!s.prompt || !String(s.prompt).trim()) { skipped += 1; continue; }
-      if (!s.firstFrameCopyBlock || !String(s.firstFrameCopyBlock).trim()) bad += 1;
-    }
-    const info = bad ? `${bad} 条已填 prompt 却缺复制块` : `已填镜头全部生成${skipped ? `（${skipped} 条空骨架跳过）` : ''}`;
-    push('firstframe-copy', '首帧出图复制块已生成', bad === 0, info);
-  }
-
-  const failed = gates.filter(g => !g.ok);
-  return { gates, passed: gates.length - failed.length, total: gates.length, skipped: gates.filter(g => /跳过/.test(g.info)).length, failed };
-}
-
-function validateStoryboard(doc, ctx) {
-  const r = gateReport(doc, ctx);
-  return { ok: r.failed.length === 0, report: r };
-}
-
-// ── 渲染：Markdown ───────────────────────────────────────
-function renderMarkdown(doc, ctx) {
-  const p = paramsOf(doc);
-  const stats = computeStats(doc);
-  const gr = gateReport(doc, ctx);
-  const L = [];
-  L.push(`# ${doc.source || '未命名'} —— 分镜表`);
-  L.push('');
-  L.push(`> 由 novel-storyboard ${SCRIPT_VERSION} 渲染 ｜ 风格：${p.style} ｜ 提示格式：${p.promptFormat} ｜ 参数：语速 ${p.charsPerSecond} 字/秒，动作 ${p.actionSeconds}s，容差 ±${Math.round(p.tolerance * 100)}%`);
-  L.push('');
-  L.push('## 总览');
-  L.push('');
-  L.push(`- 集数：${stats.episodes}`);
-  L.push(`- 镜头数：${stats.totalShots}`);
-  L.push(`- 预估总时长：${fmtSec(stats.totalSeconds)}s`);
-  L.push(`- 平均镜长：${fmtSec(stats.avgShotSec)}s`);
-  L.push(`- 生成批次：${stats.batchCount}`);
-  L.push('');
-  L.push('## 质量门');
-  L.push('');
-  L.push(`通过 ${gr.passed}/${gr.total}（跳过 ${gr.skipped}）${gr.failed.length ? ' ❌' : ' ✅'}`);
-  L.push('');
-  for (const g of gr.gates) L.push(`- [${g.ok ? 'x' : ' '}] **${g.name}** ${g.info}`);
-  L.push('');
-  for (const ep of doc.episodes || []) {
-    L.push(`## 第 ${ep.ep} 集（预估 ${fmtSec(ep.targetSeconds)}s）`);
-    L.push('');
-    L.push('| 镜号 | 场景 | 光照 | 角色 | 道具 | 景别 | 机位 | 时长 | 首帧提示词 | H3 描述 | 批次 | 预警 |');
-    L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
-    for (const s of ep.shots || []) {
-      const chars = (s.characters || []).map(c => ctx && ctx.cidToName[c] ? ctx.cidToName[c] : c).join('、');
-      const prompt = (s.prompt || '').slice(0, 90) + ((s.prompt || '').length > 90 ? '…' : '');
-      const h3 = (s.h3 && s.h3.integrated_multimodal_description || '').slice(0, 110) + ((s.h3 && s.h3.integrated_multimodal_description || '').length > 110 ? '…' : '');
-      L.push(`| ${s.shotId} | ${s.sceneId} | ${s.lighting} | ${chars} | ${(s.props || []).join('、')} | ${s.shotType} | ${s.camera} | ${fmtSec(s.durationSec)}s | ${prompt} | ${h3} | ${s.batch} | ${(s.warnings || []).join(';')} |`);
-    }
-    L.push('');
-    // 可复制提示词块（首帧出图 + H3 视频），直接粘进 ComfyUI 工作流
-    L.push(`### 第 ${ep.ep} 集 · 可复制提示词块`);
-    L.push('');
-    for (const s of ep.shots || []) {
-      L.push(`#### ${s.shotId}（${s.shotType} / ${s.camera} / ${fmtSec(s.durationSec)}s）`);
-      L.push('');
-      L.push('**首帧出图（Krea2 ComfyUI）**');
-      L.push('');
-      L.push('```');
-      L.push(s.firstFrameCopyBlock || '（未生成）');
-      L.push('```');
-      L.push('');
-      if (s.h3CopyBlock) {
-        L.push('**视频生成（MiniMax H3 ComfyUI）**');
-        L.push('');
-        L.push('```');
-        L.push(s.h3CopyBlock);
-        L.push('```');
-      }
-      L.push('');
-    }
-  }
-  return L.join('\n');
-}
-
-// ── 渲染：HTML ───────────────────────────────────────────
-// ── 亮色国风样式（与另外 4 个 skill 的 HTML 报告统一）──
-const HTML_STYLE = `:root{
-  --paper:#eceded; --panel:#f5f6f5; --side:#e4e6e3; --ink:#191d21; --ink-2:#5b636a; --ink-3:#8c9298;
-  --rule:#d2d5d0; --rule-2:#c2c6bf; --seal:#8a3324; --seal-2:#c56a4e; --seal-soft:#8a332412; --ok:#3d6b4f;
-  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
-  --sans:-apple-system,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif;
-}
-*{box-sizing:border-box;margin:0;padding:0}
-body{font-family:var(--sans);background:var(--paper);color:var(--ink);padding:24px}
-h1{font:400 26px/1.1 "Songti SC","STSong","Source Han Serif SC",serif;letter-spacing:.04em;margin-bottom:6px}
-.meta{color:var(--ink-2);font-size:13px;margin-bottom:18px}
-.kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
-.kpi{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:11px 16px;min-width:110px}
-.kpi .v{font:400 26px/1.15 "Songti SC","STSong",serif;margin-top:5px}
-.kpi .k{font:500 10px/1 var(--sans);letter-spacing:.18em;color:var(--ink-3);margin-top:2px}
-.banner{border-radius:2px;padding:12px 16px;font-weight:700;margin-bottom:18px;border:1px solid var(--seal)}
-.pass{background:var(--seal-soft);color:var(--ok);border-color:var(--ok)}
-.fail{background:var(--seal-soft);color:var(--seal);border-color:var(--seal)}
-h2{font:400 18px/1.2 "Songti SC","STSong",serif;letter-spacing:.05em;margin:22px 0 8px}
-.sub{color:var(--ink-2);font-size:13px;font-weight:400}
-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:8px;background:var(--panel);border:1px solid var(--rule)}
-th,td{border:1px solid var(--rule);padding:6px 8px;text-align:left;vertical-align:top}
-th{background:var(--side);color:var(--ink-3);font:500 11px/1 var(--sans);letter-spacing:.1em}
-.prompt{color:var(--ink-2);max-width:300px;font-family:var(--mono);font-size:11.5px}
-.h3desc{color:var(--ink);max-width:360px;font-family:"Songti SC",serif}
-.warn{color:var(--seal);font-size:11.5px}
-.gates{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:14px 18px;margin-bottom:18px}
-.gates h2{margin-top:0}.gates ul{list-style:none;padding:0}.gates li{margin:5px 0;font-size:13px;display:flex;gap:8px}.gates .ok{color:var(--ok)}.gates .bad{color:var(--seal)}.gates .info{color:var(--ink-3)}
-.batches{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
-.batch{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:6px 10px;font-size:12px}
-.shot-copy{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:8px 12px;margin:8px 0}
-.shot-copy>summary{cursor:pointer;color:var(--seal);font-size:13px;font-weight:600}
-.cb{margin:8px 0}.cbl{color:var(--ink-2);font-size:11.5px;margin-bottom:4px}
-.cb pre{background:var(--paper);border:1px solid var(--rule-2);border-radius:2px;padding:10px;font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--ink);max-height:320px;overflow:auto;font-family:var(--mono)}
-.layers{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:12px 16px;margin-bottom:18px;font-size:12.5px}
-.layers b{color:var(--seal)}.layers .note{color:var(--ink-2);margin-top:6px}
-.data{border:1px solid var(--rule);border-radius:2px;margin-bottom:18px;overflow:hidden}
-.data summary{cursor:pointer;background:var(--panel);padding:12px 16px;font-weight:700;font-size:13px;color:var(--seal);border-bottom:1px solid var(--rule)}
-.data .bar{padding:8px 16px;display:flex;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--rule)}
-.data .bar button{background:var(--panel);color:var(--ink);border:1px solid var(--rule-2);border-radius:2px;padding:5px 12px;font-size:12px;cursor:pointer}
-.data .bar button:hover{border-color:var(--seal);color:var(--seal)}
-.data pre{margin:0;padding:14px 16px;background:var(--paper);color:var(--ink);font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;font-family:var(--mono)}
-@media print{body{background:#fff}.layers,.data .bar{display:none}}`;
-
-// 单集 section（供整份报告复用）
-function epHtmlSection(doc, ep, ctx) {
-  const rows = (ep.shots || []).map(s => {
-    const chars = (s.characters || []).map(c => ctx && ctx.cidToName[c] ? ctx.cidToName[c] : c).join('、');
-    const prompt = (s.prompt || '').slice(0, 120) + ((s.prompt || '').length > 120 ? '…' : '');
-    const h3 = (s.h3 && s.h3.integrated_multimodal_description || '').slice(0, 160) + ((s.h3 && s.h3.integrated_multimodal_description || '').length > 160 ? '…' : '');
-    const warn = (s.warnings || []).map(w => `<span class="warn">⚠ ${esc(w)}</span>`).join(' ');
-    return `<tr><td>${esc(s.shotId)}</td><td>${esc(s.sceneId)}</td><td>${esc(s.lighting)}</td><td>${esc(chars)}</td><td>${esc((s.props||[]).join('、'))}</td><td>${esc(s.shotType)}</td><td>${esc(s.camera)}</td><td>${fmtSec(s.durationSec)}s</td><td class="prompt">${esc(prompt)}</td><td class="h3desc">${esc(h3)}</td><td>${esc(s.batch)}</td><td>${warn}</td></tr>`;
-  }).join('');
-  const copyBlocks = (ep.shots || []).map(s => {
-    const h3 = s.h3CopyBlock ? `<div class="cb"><div class="cbl">视频生成（MiniMax H3 ComfyUI）</div><pre>${esc(s.h3CopyBlock)}</pre></div>` : '';
-    return `<details class="shot-copy"><summary>${esc(s.shotId)} · 可复制提示词块</summary><div class="cb"><div class="cbl">首帧出图（Krea2 ComfyUI）</div><pre>${esc(s.firstFrameCopyBlock || '（未生成）')}</pre></div>${h3}</details>`;
-  }).join('');
-  return `<section class="ep"><h2>第 ${ep.ep} 集 <span class="sub">预估 ${fmtSec(ep.targetSeconds)}s</span></h2><table><thead><tr><th>镜号</th><th>场景</th><th>光照</th><th>角色</th><th>道具</th><th>景别</th><th>机位</th><th>时长</th><th>首帧提示词</th><th>H3 描述</th><th>批次</th><th>预警</th></tr></thead><tbody>${rows}</tbody></table>${copyBlocks}</section>`;
-}
-
-// 单集独立 HTML 文件（--per-ep）：排版借鉴 outline/script 的分集卡结构（.ep + .gate 网格）。
-function renderEpHtml(doc, ctx, ep) {
-  const p = paramsOf(doc);
-  const stats = computeStats(doc);
-  const gr = gateReport(doc, ctx);
-  const epShots = (ep.shots || []);
-  const epSeconds = epShots.reduce((n, s) => n + (s.durationSec || 0), 0);
-  const epBatchIds = [...new Set(epShots.map(s => s.batch).filter(Boolean))].sort();
-  const epBatchCount = epBatchIds.length;
-  const passClass = gr.failed.length ? 'fail' : 'pass';
-  const passText = gr.failed.length ? `未通过 ${gr.failed.length} 道` : '全部通过';
-  const gateRows = gr.gates.map(g => `<li class="${g.ok ? 'ok' : 'bad'}">${g.ok ? '✅' : '❌'} <b>${esc(g.name)}</b> <span class="info">${esc(g.info)}</span></li>`).join('');
-  const batchRows = epBatchIds.map(b => `<div class="batch"><b>${esc(b)}</b></div>`).join('');
-  // 单集报告只内嵌本集数据（而非整份 doc），既瘦身又契合「单集」语义；复制/下载本集 JSON。
-  const jsonPayload = JSON.stringify(ep, null, 2);
-  const epJsonName = `E${String(ep.ep).padStart(2, '0')}.json`;
-  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 第 ${ep.ep} 集</title><style>${HTML_STYLE}</style></head><body>
-<div class="layers">
-  <b>三层交付物（用途务必分清）</b><br>
-  · <b>JSON</b>（Agent 用）：机器可读的分镜生产单。下方「JSON 源码」即同份数据。<br>
-  · <b>HTML</b>（人审用）：本页——单集 KPI / 质量门 / 批次 / 逐镜表 + 可复制提示词。<br>
-  · <b>Prompt</b>（生产用）：export 命令产出的平铺 txt 包，直接粘进 Krea2 / MiniMax H3 / ComfyUI。
-  <div class="note">角色图不在本流程内生成。把「JSON 源码」里 refImagePaths 指向的路径放入你在别处生成的定稿图，再回填路径即可。</div>
-</div>
-<details class="data"><summary>📦 JSON 源码（Agent 用 · 点击展开）</summary>
-<div class="bar"><button id="copyJson">复制本集 JSON</button><button id="dlJson">下载 ${esc(epJsonName)}</button><span class="info" id="jsonSize"></span></div>
-<pre id="jsonView"></pre></details>
-<script>
-  const SB_DATA = ${jsonPayload};
-  (function(){
-    const v=document.getElementById('jsonView');
-    const txt=JSON.stringify(SB_DATA,null,2);
-    v.textContent=txt;
-    document.getElementById('jsonSize').textContent='('+ (txt.length/1024).toFixed(0) +' KB, 第 ${ep.ep} 集 '+ ${epShots.length} +' 镜)';
-    document.getElementById('copyJson').onclick=async()=>{try{await navigator.clipboard.writeText(txt);}catch(e){const t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();}const b=document.getElementById('copyJson');b.textContent='已复制';setTimeout(()=>b.textContent='复制本集 JSON',1200);};
-    document.getElementById('dlJson').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));a.download='${epJsonName}';a.click();URL.revokeObjectURL(a.href);};
-  })();
-</script>
-<h1>${esc(doc.source || '未命名')} · 第 ${ep.ep} 集</h1>
-<div class="meta">novel-storyboard ${SCRIPT_VERSION} ｜ 风格 ${esc(p.style)} ｜ 提示格式 ${esc(p.promptFormat)} ｜ 语速 ${p.charsPerSecond} 字/秒 ｜ 动作 ${p.actionSeconds}s ｜ 容差 ±${Math.round(p.tolerance * 100)}%</div>
-<div class="kpis">
-<div class="kpi"><div class="v">${epShots.length}</div><div class="k">本集镜头</div></div>
-<div class="kpi"><div class="v">${fmtSec(epSeconds)}s</div><div class="k">本集预估时长</div></div>
-<div class="kpi"><div class="v">${fmtSec(ep.targetSeconds)}s</div><div class="k">目标时长</div></div>
-<div class="kpi"><div class="v">${epBatchCount}</div><div class="k">生成批次</div></div>
-<div class="kpi"><div class="v">${stats.episodes}</div><div class="k">总集数</div></div>
-</div>
-<div class="banner ${passClass}">质量门（全剧）：通过 ${gr.passed}/${gr.total}（跳过 ${gr.skipped}）｜ ${passText}</div>
-<div class="gates"><h2>质量门明细</h2><ul>${gateRows}</ul></div>
-<div class="gates"><h2>本集生成批次</h2><div class="batches">${batchRows || '<span class="info">无</span>'}</div></div>
-${epHtmlSection(doc, ep, ctx)}
-</body></html>`;
-}
-
-function renderHtml(doc, ctx) {
-  const p = paramsOf(doc);
-  const stats = computeStats(doc);
-  const gr = gateReport(doc, ctx);
-  const gateRows = gr.gates.map(g => `<li class="${g.ok ? 'ok' : 'bad'}">${g.ok ? '✅' : '❌'} <b>${esc(g.name)}</b> <span class="info">${esc(g.info)}</span></li>`).join('');
-  const batchRows = stats.batches.map(b => `<div class="batch"><b>${esc(b.id)}</b> ×${b.count}：${esc(b.shotIds.join(', '))}</div>`).join('');
-
-  const epSections = (doc.episodes || []).map(ep => epHtmlSection(doc, ep, ctx)).join('');
-
-  const passClass = gr.failed.length ? 'fail' : 'pass';
-  const passText = gr.failed.length ? `未通过 ${gr.failed.length} 道` : '全部通过';
-
-  const jsonPayload = JSON.stringify(doc, null, 2);
-
-  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 分镜</title><style>${HTML_STYLE}</style></head><body>
-<div class="layers">
-  <b>三层交付物（用途务必分清）</b><br>
-  · <b>JSON</b>（Agent 用）：机器可读的分镜生产单，结构化、可程序化驱动下游。下方「JSON 源码」即同份数据。<br>
-  · <b>HTML</b>（人审用）：本页——给人看 KPI / 质量门 / 批次 / 逐镜表，并内嵌 JSON 与可复制提示词，方便审阅与人工决策。<br>
-  · <b>Prompt</b>（生产用）：export 命令产出的平铺 txt 包，直接粘进 Krea2 / MiniMax H3 / ComfyUI 生图生视频。
-  <div class="note">角色图不在本流程内生成。把上方「JSON 源码」里 refImagePaths 指向的路径（如 assets/cast/林默-model-sheet.png）放入你在别处生成的定稿图，再回填路径即可。</div>
-</div>
-<details class="data"><summary>📦 JSON 源码（Agent 用 · 点击展开）</summary>
-<div class="bar"><button id="copyJson">复制 JSON</button><button id="dlJson">下载 storyboard.json</button><span class="info" id="jsonSize"></span></div>
-<pre id="jsonView"></pre></details>
-<script>
-  const SB_DATA = ${jsonPayload};
-  (function(){
-    const v=document.getElementById('jsonView');
-    const txt=JSON.stringify(SB_DATA,null,2);
-    v.textContent=txt;
-    document.getElementById('jsonSize').textContent='('+ (txt.length/1024).toFixed(0) +' KB, '+ (SB_DATA.episodes?SB_DATA.episodes.reduce((n,e)=>n+(e.shots?e.shots.length:0),0):0) +' 镜)';
-    document.getElementById('copyJson').onclick=async()=>{try{await navigator.clipboard.writeText(txt);}catch(e){const t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();}const b=document.getElementById('copyJson');b.textContent='已复制';setTimeout(()=>b.textContent='复制 JSON',1200);};
-    document.getElementById('dlJson').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));a.download='storyboard.json';a.click();URL.revokeObjectURL(a.href);};
-  })();
-</script>
-<h1>${esc(doc.source || '未命名')} · 分镜表</h1>
-<div class="meta">novel-storyboard ${SCRIPT_VERSION} ｜ 风格 ${esc(p.style)} ｜ 提示格式 ${esc(p.promptFormat)} ｜ 语速 ${p.charsPerSecond} 字/秒 ｜ 动作 ${p.actionSeconds}s ｜ 容差 ±${Math.round(p.tolerance * 100)}%</div>
-<div class="kpis">
-<div class="kpi"><div class="v">${stats.episodes}</div><div class="k">集数</div></div>
-<div class="kpi"><div class="v">${stats.totalShots}</div><div class="k">镜头数</div></div>
-<div class="kpi"><div class="v">${fmtSec(stats.totalSeconds)}s</div><div class="k">预估总时长</div></div>
-<div class="kpi"><div class="v">${fmtSec(stats.avgShotSec)}s</div><div class="k">平均镜长</div></div>
-<div class="kpi"><div class="v">${stats.batchCount}</div><div class="k">生成批次</div></div>
-</div>
-<div class="banner ${passClass}">质量门：通过 ${gr.passed}/${gr.total}（跳过 ${gr.skipped}）｜ ${passText}</div>
-<div class="gates"><h2>质量门明细</h2><ul>${gateRows}</ul></div>
-<div class="gates"><h2>生成批次单</h2><div class="batches">${batchRows || '<span class="info">无</span>'}</div></div>
-${epSections}
-</body></html>`;
-}
-
-// ── CLI ───────────────────────────────────────────────────
-function readDoc(p) { return getJSON(p); }
-function printJSON(o) { process.stdout.write(JSON.stringify(o, null, 2) + '\n'); }
-
-function parseArgs(argv) {
-  const pos = []; const opts = {};
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a.startsWith('--')) {
-      let k = a.slice(2); let v = true;
-      if (k.includes('=')) { const idx = k.indexOf('='); v = k.slice(idx + 1); k = k.slice(0, idx); }
-      else if (argv[i + 1] && !argv[i + 1].startsWith('--')) { v = argv[i + 1]; i++; }
-      opts[k] = v;
-    } else pos.push(a);
-  }
-  return { pos, opts };
-}
-
-function resolveCtx(opts) {
-  return buildContext({
-    script: opts.script || opts.s,
-    outline: opts.outline || opts.o,
-    art: opts.art || opts.a,
-    cast: opts.cast || opts.c
-  });
-}
-
-function cmdSeed(args) {
-  const { pos, opts } = parseArgs(args);
-  const scriptPath = pos[0];
-  if (!scriptPath) { console.error('用法: seed <script.json> [--outline --art --cast] [--autofill] [--prompt-format h3|legacy] [--h3-mode i2va|t2va] [--eps 1-3]'); process.exit(2); }
-  const script = getJSON(scriptPath);
-  const ctx = resolveCtx(opts);
-  const params = paramsOf(script);
-  if (opts['prompt-format']) params.promptFormat = opts['prompt-format']; // 'h3' | 'legacy'
-  if (opts['h3-mode']) params.h3Mode = opts['h3-mode']; // 'i2va' | 't2va'
-  // 风格单一来源：传 --art 时以 art.json.style 为准，保证分镜与美术/角色同档
-  if (opts.art && existsSync(resolve(opts.art))) {
-    try { const art = getJSON(resolve(opts.art)); if (art && art.style) params.style = art.style; } catch (_) {}
-  }
-  let episodes = deriveShotsFromScript(script, { ctx, autofill: !!opts.autofill, params });
-
-  // --eps 范围裁剪（支持 "3" 单集 或 "1-3" 区间）
-  if (opts.eps) {
-    const parts = opts.eps.split('-').map(Number);
-    const a = parts[0]; const b = parts.length > 1 ? parts[1] : a;
-    episodes = (episodes || []).filter(e => e.ep >= a && e.ep <= b);
-  }
-
-  const doc = {
-    source: script.source || basename(scriptPath, extname(scriptPath)),
+  return {
     params,
     episodes,
-    _embed: {
-      script: opts.script || opts.s || null,
-      outline: opts.outline || opts.o || null,
-      art: opts.art || opts.a || null,
-      cast: opts.cast || opts.c || null
-    }
+    totals,
+    dialogue,
+    batches: [...batches.values()].map((b) => ({
+      sceneId: b.sceneId, lighting: b.lighting, segments: b.segments,
+      characters: [...b.characters], props: [...b.props],
+    })),
   };
-  const outName = `${slugify(doc.source)}-storyboard.json`;
-  const outPath = opts.out ? resolve(opts.out) : resolve(process.cwd(), outName);
-  writeFileSync(outPath, JSON.stringify(doc, null, 2));
-  const stats = computeStats(doc);
-  console.error(`✓ 已生成 ${outPath}`);
-  console.error(`  镜头 ${stats.totalShots} 条 / ${stats.episodes} 集 / 预估 ${fmtSec(stats.totalSeconds)}s / 批次 ${stats.batchCount}`);
-  if (opts.autofill) console.error(`  --autofill：提示词已按 art/cast 自动合成（格式=${params.promptFormat}${params.promptFormat !== 'legacy' ? `，含 H3 ${params.h3Mode.toUpperCase()} 视频提示词 + 首帧/视频可直接复制块` : '，仅首帧图像提示词'}，可继续手工润色）`);
-  console.error('  下一步：运行 validate 过质量门，或 render 预览');
-  return outPath;
 }
 
-function cmdValidate(args) {
-  const { pos, opts } = parseArgs(args);
-  const p = pos[0];
-  if (!p) { console.error('用法: validate <storyboard.json> [--script --outline --art --cast]'); process.exit(2); }
-  const doc = readDoc(p);
-  const ctx = resolveCtx(opts);
-  const v = validateStoryboard(doc, ctx);
-  const gr = v.report;
-  console.error(`质量门：通过 ${gr.passed}/${gr.total}（跳过 ${gr.skipped}）`);
-  for (const g of gr.gates) console.error(`  [${g.ok ? 'PASS' : 'FAIL'}] ${g.name} — ${g.info}`);
-  if (!v.ok) { console.error('✗ 存在未通过的质量门'); process.exit(1); }
-  console.error('✓ 全部质量门通过');
-}
+/* ------------------------------------------------------------------ */
+/* 质量门                                                               */
+/* ------------------------------------------------------------------ */
 
-function cmdCheckup(args) {
-  const { pos, opts } = parseArgs(args);
-  const p = pos[0];
-  if (!p) { console.error('用法: checkup <storyboard.json> [--script --outline --art --cast]'); process.exit(2); }
-  const doc = readDoc(p);
-  const ctx = resolveCtx(opts);
-  const gr = gateReport(doc, ctx);
-  const L = [];
-  for (const g of gr.gates) L.push(`${g.ok ? 'PASS' : 'FAIL'}  ${g.name}  (${g.info})`);
-  L.push(`---`);
-  L.push(`通过 ${gr.passed}/${gr.total}，跳过 ${gr.skipped}，失败 ${gr.failed.length}`);
-  process.stdout.write(L.join('\n') + '\n');
-}
+export function gateReport(board, ctx = {}) {
+  const gates = [];
+  const add = (id, label, ok, detail = '') => gates.push({ id, label, ok, detail });
+  const params = paramsOf(board);
+  const script = ctx.script ?? null;
+  const expanded = script ? expandScript(script) : null;
+  const eps = Array.isArray(board?.episodes) ? board.episodes : [];
+  const bad = {
+    coverage: [], segCap: [], cutLen: [], fit: [], duration: [], crowd: [],
+    id: [], size: [], camera: [], english: [], names: [], refs: [],
+    h3s: [], h3d: [], h3e: [], style: [],
+  };
+  const styleId = board?.style ?? DEFAULT_STYLE;
+  const style = STYLE_PRESETS[styleId];
+  if (!style) bad.style.push(`style「${styleId}」不在预设里（${Object.keys(STYLE_PRESETS).join(' / ')}）`);
+  // 提示词语言：默认英文——官方规范的口径（台词仍在 <d> 里保留原文）；'zh' 可切整条中文
+  const promptLang = board?.promptLang ?? 'en';
 
-function cmdRender(args) {
-  const { pos, opts } = parseArgs(args);
-  const p = pos[0];
-  if (!p) { console.error('用法: render <storyboard.json> [--md|--html] [--per-ep] [--script --outline --art --cast] [--all] [--out 路径或目录]'); process.exit(2); }
-  const doc = readDoc(p);
-  const ctx = resolveCtx(opts);
-  const md = opts.html ? null : true;
-  const html = opts.html ? true : false;
-  // --per-ep：每集一个独立 HTML 文件（借鉴 outline/script 的分集卡排版），输出到 --out 目录。
-  if (opts['per-ep']) {
-    const outDir = opts.out ? resolve(opts.out) : resolve(process.cwd(), 'by-episode');
-    mkdirSync(outDir, { recursive: true });
-    const eps = doc.episodes || [];
-    let n = 0;
-    const idxLinks = [];
-    for (const ep of eps) {
-      const fn = `E${String(ep.ep).padStart(2, '0')}.html`;
-      writeFileSync(join(outDir, fn), renderEpHtml(doc, ctx, ep));
-      const sec = (ep.shots || []).reduce((s, sh) => s + (sh.durationSec || 0), 0);
-      idxLinks.push(`<li><a href="./${fn}">第 ${ep.ep} 集</a> · ${(ep.shots || []).length} 镜 · 预估 ${fmtSec(sec)}s</li>`);
-      n += 1;
+  // 提示词禁人名：outline 的名字 + cast 的名字与别名
+  const banned = [];
+  for (const c of ctx.outline?.characters ?? []) if (c?.name) banned.push(c.name);
+  for (const c of ctx.cast?.characters ?? []) {
+    if (c?.name) banned.push(c.name);
+    for (const a of c?.aliases ?? []) banned.push(a);
+  }
+
+  for (const ep of eps) {
+    const label = `E${String(ep?.ep).padStart(2, '0')}`;
+    const sEp = expanded?.get(ep?.ep);
+    if (expanded && !sEp) bad.refs.push(`${label} 在剧本里不存在`);
+
+    // 段号纪律：格式、集号一致、连号
+    (ep?.segments ?? []).forEach((seg, i) => {
+      const want = `${label}-${String(i + 1).padStart(2, '0')}`;
+      if (seg?.id !== want) bad.id.push(`第 ${i + 1} 段应为 ${want}，实际「${seg?.id}」`);
+    });
+
+    let prevSceneIndex = 0;
+    for (const seg of ep?.segments ?? []) {
+      const sid = seg?.id ?? '?';
+      const cuts = seg?.cuts ?? [];
+      const total = segSeconds(seg);
+
+      if (!(total > 0) || total > params.maxSegmentSeconds) {
+        bad.segCap.push(`${sid} 共 ${total} 秒`);
+      }
+
+      const h3 = String(seg?.h3Prompt ?? '');
+      // H3 结构：首行对齐指令逐字对账（由分镜结构按 promptLang 推导），三字段按序，切点时刻逐个对
+      const tk = H3_TOKENS[promptLang] ?? H3_TOKENS.zh;
+      const wantLine = h3AlignmentLine(cuts, promptLang);
+      if (!h3.trimStart().startsWith(wantLine)) {
+        bad.h3s.push(`${sid} 首行对齐指令和分镜结构对不上（promptLang=${promptLang}）`);
+      } else {
+        const idx = tk.fields.map((f) => h3.indexOf(f));
+        if (idx.some((i) => i < 0) || !(idx[0] < idx[1] && idx[1] < idx[2])) {
+          bad.h3s.push(`${sid} 三个核心字段缺失或顺序不对`);
+        } else {
+          const starts = cutStarts(cuts);
+          if (h3.indexOf(tk.shot(1), idx[0]) < 0) bad.h3s.push(`${sid} 描述正文缺 ${tk.shot(1)}`);
+          for (let k = 2; k <= cuts.length; k++) {
+            const mark = tk.cutMark(k, h3CutTime(starts[k - 1]));
+            if (h3.indexOf(mark, idx[0]) < 0) bad.h3s.push(`${sid} 缺「${mark}」——切点时刻必须等于前面分镜秒数的累计`);
+          }
+        }
+      }
+      const rest = h3Remainder(h3);
+      if (promptLang === 'en') {
+        if (CJK.test(rest)) bad.h3e.push(`${sid} 的 h3Prompt 设定英文却在 <d> 台词之外混入了中文`);
+        // 英文提示词禁人名（图像/视频模型对英文语境的人名有偏见）；中文提示词人名放行——身份靠分镜图锚定
+        for (const name of banned) {
+          if (rest.includes(name)) bad.names.push(`${sid} 的 h3Prompt 在台词之外出现角色名「${name}」`);
+        }
+      } else if (!CJK.test(rest)) {
+        bad.h3e.push(`${sid} 设定中文提示词（promptLang=${promptLang}），正文却写成了英文`);
+      }
+
+      const slices = h3CutSlices(h3, cuts.length, promptLang);
+      const scene = sEp ? sEp.scenes[seg?.sceneIndex - 1] : null;
+      if (sEp && !scene) bad.refs.push(`${sid} 的 sceneIndex ${seg?.sceneIndex} 在剧本第 ${ep.ep} 集里不存在`);
+      if (scene) {
+        if (seg.sceneIndex < prevSceneIndex) bad.coverage.push(`${sid} 场次顺序倒退`);
+        prevSceneIndex = Math.max(prevSceneIndex, seg.sceneIndex);
+      }
+
+      cuts.forEach((cut, ci) => {
+        const cid = `${sid}#${ci + 1}`;
+
+        if (!(cut?.seconds >= params.minCutSeconds) || cut.seconds > params.maxCutSeconds) {
+          bad.cutLen.push(`${cid} ${cut?.seconds ?? '?'} 秒`);
+        }
+        if ((cut?.characters ?? []).length > params.maxOnScreen && !String(cut?.note ?? seg?.note ?? '').trim()) {
+          bad.crowd.push(`${cid} 同框 ${cut.characters.length} 人且没有拆解说明`);
+        }
+        if (!SHOT_SIZES[cut?.size]) {
+          bad.size.push(`${cid} 景别「${cut?.size}」不在枚举里`);
+        } else if (!String(cut?.frame ?? '').toLowerCase().includes(SHOT_SIZES[cut.size].phrase)) {
+          bad.size.push(`${cid} 分镜图提示词缺景别短语「${SHOT_SIZES[cut.size].phrase}」`);
+        }
+        if (!CAMERA_MOVES[cut?.camera]) {
+          bad.camera.push(`${cid} 运镜「${cut?.camera}」不在 H3 词表里`);
+        } else {
+          const slice = slices[ci];
+          const term = promptLang === 'en' ? String(cut.camera).toLowerCase() : CAMERA_MOVES[cut.camera];
+          if (slice == null) {
+            bad.camera.push(`${cid} 在 h3Prompt 里找不到对应的 [Shot ${ci + 1}] 段落`);
+          } else if (!(promptLang === 'en' ? slice.toLowerCase() : slice).includes(term)) {
+            bad.camera.push(`${cid} 的 [Shot ${ci + 1}] 段落缺运镜词「${term}」`);
+          }
+        }
+        const frame = String(cut?.frame ?? '');
+        if (!frame.trim()) bad.english.push(`${cid} 的分镜图提示词为空`);
+        if (CJK.test(frame)) bad.english.push(`${cid} 的分镜图提示词混入了非英文`);
+        if (style && !frame.toLowerCase().includes(style.phrase)) {
+          bad.style.push(`${cid} 的分镜图提示词缺风格短语「${style.phrase}」`);
+        }
+        for (const name of banned) {
+          if (frame.includes(name)) bad.names.push(`${cid} 的分镜图提示词出现角色名「${name}」`);
+        }
+
+        // 引用对账 + 台词装得下 + 台词逐字进 <d>
+        if (scene) {
+          const cast = new Set(scene.characters);
+          for (const c of cut?.characters ?? []) {
+            if (!cast.has(c)) bad.refs.push(`${cid} 的 ${c} 不在剧本该场人物里`);
+          }
+          const propSet = new Set(scene.props);
+          for (const pr of cut?.props ?? []) {
+            if (!propSet.has(pr)) bad.refs.push(`${cid} 的 ${pr} 不在剧本该场道具里`);
+          }
+          const [from, to] = cut?.beats ?? [];
+          if (Number.isInteger(from) && Number.isInteger(to) && from >= 1 && to <= scene.beats.length && from <= to) {
+            let dlg = 0;
+            for (const b of scene.beats.slice(from - 1, to)) {
+              if (b.kind !== 'line') continue;
+              dlg += b.seconds;
+              const re = new RegExp(`<d>\\[[^\\]]+\\]\\s*${b.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*</d>`);
+              if (!re.test(h3)) bad.h3d.push(`${sid} 的 h3Prompt 缺台词「${b.text.slice(0, 12)}…」的 <d> 块`);
+            }
+            if (dlg > cut.seconds) bad.fit.push(`${cid} 台词 ${r1(dlg)} 秒装不进 ${cut.seconds} 秒`);
+          }
+        }
+      });
     }
-    // 目录导航页（index.html）：亮色国风，列出各集入口
-    const idx = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 分镜（按集）</title><style>${HTML_STYLE}</style></head><body>
-<h1>${esc(doc.source || '未命名')} · 分镜表（按集）</h1>
-<div class="meta">novel-storyboard ${SCRIPT_VERSION} ｜ 共 ${eps.length} 集 ｜ 点击任一集进入单集报告</div>
-<div class="gates"><h2>各集入口</h2><ul>${idxLinks.join('')}</ul></div>
-</body></html>`;
-    writeFileSync(join(outDir, 'index.html'), idx);
-    console.error(`✓ 已按集生成 ${n} 份 HTML 报告 → ${outDir}`);
-    console.error(`  · index.html 为目录导航页`);
+
+    // 节拍全覆盖：每场的节拍被恰好一次、按顺序、连续认领（分镜级）
+    if (sEp) {
+      for (const scene of sEp.scenes) {
+        const claims = [];
+        for (const seg of ep?.segments ?? []) {
+          if (seg?.sceneIndex !== scene.sceneIndex) continue;
+          (seg?.cuts ?? []).forEach((cut, ci) => {
+            const [from, to] = cut?.beats ?? [];
+            if (!Number.isInteger(from) || !Number.isInteger(to) || from < 1 || to > scene.beats.length || from > to) {
+              bad.coverage.push(`${seg.id}#${ci + 1} 的节拍区间 [${from}, ${to}] 不合法（该场共 ${scene.beats.length} 拍）`);
+              return;
+            }
+            claims.push([from, to, `${seg.id}#${ci + 1}`]);
+          });
+        }
+        let cursor = 1;
+        for (const [from, to, id] of claims) {
+          if (from !== cursor) {
+            bad.coverage.push(`${label} 第 ${scene.sceneIndex} 场第 ${cursor} 拍${from > cursor ? '没人认领' : `被 ${id} 重复认领`}`);
+          }
+          cursor = Math.max(cursor, to + 1);
+        }
+        if (claims.length && cursor <= scene.beats.length) {
+          bad.coverage.push(`${label} 第 ${scene.sceneIndex} 场第 ${cursor}–${scene.beats.length} 拍没人认领`);
+        }
+        if (!claims.length && scene.beats.length) {
+          bad.coverage.push(`${label} 第 ${scene.sceneIndex} 场整场没有分镜`);
+        }
+      }
+
+      // 每集总时长对齐剧本目标
+      if (sEp.targetSeconds > 0) {
+        const total = (ep?.segments ?? []).reduce((n, s) => n + segSeconds(s), 0);
+        const lo = sEp.targetSeconds * (1 - params.tolerance);
+        const hi = sEp.targetSeconds * (1 + params.tolerance);
+        if (total < lo) bad.duration.push(`${label} 欠 ${r1(lo - total)} 秒（${r1(total)}s / 目标 ${sEp.targetSeconds}s）`);
+        if (total > hi) bad.duration.push(`${label} 超 ${r1(total - hi)} 秒（${r1(total)}s / 目标 ${sEp.targetSeconds}s）`);
+      }
+    }
+  }
+
+  const SKIP_SCRIPT = '未提供 script.json，本门跳过（视为通过）';
+  const SKIP_NAMES = '未提供 outline/cast，本门跳过（视为通过）';
+
+  add('coverage', '剧本节拍被恰好一次、按顺序、连续认领（分镜级）', bad.coverage.length === 0, script ? bad.coverage.join('；') : SKIP_SCRIPT);
+  add('segment-cap', `每段 0 < 总秒数 ≤ ${params.maxSegmentSeconds}（一次生成的上限）`, eps.length > 0 && bad.segCap.length === 0, bad.segCap.join('；'));
+  add('cut-length', `每个分镜 ${params.minCutSeconds}–${params.maxCutSeconds} 秒——短剧的注意力节奏`, eps.length > 0 && bad.cutLen.length === 0, bad.cutLen.join('；'));
+  add('dialogue-fit', '认领节拍的台词装得进分镜秒数', bad.fit.length === 0, script ? bad.fit.join('；') : SKIP_SCRIPT);
+  add('ep-duration', `每集总时长在剧本目标 ±${Math.round(params.tolerance * 100)}% 内`, bad.duration.length === 0, script ? bad.duration.join('；') : SKIP_SCRIPT);
+  add('crowd', `单个分镜同框 ≤ ${params.maxOnScreen} 人，超了必须带拆解说明`, bad.crowd.length === 0, bad.crowd.join('；'));
+  add('segment-id', '段号 E01-01 格式、按顺序连号', bad.id.length === 0, bad.id.join('；'));
+  add('size-phrase', '景别短语写进分镜图提示词', bad.size.length === 0, bad.size.join('；'));
+  add('camera-phrase', '运镜用 H3 官方词表，且出现在自己的 [Shot k] 段落里', bad.camera.length === 0, bad.camera.join('；'));
+  add('h3-structure', 'H3 首行对齐指令由分镜结构推导逐字对账，切点时刻逐个对', eps.length > 0 && bad.h3s.length === 0, bad.h3s.join('；'));
+  add('h3-dialogue', '认领节拍的台词逐字进 H3 提示词的 <d> 块', bad.h3d.length === 0, script ? bad.h3d.join('；') : SKIP_SCRIPT);
+  add('h3-lang', `H3 提示词语言与设定一致（promptLang=${promptLang}，正文${promptLang === 'en' ? '全英文' : '中文'}、骨架 token 官方英文格式）`, bad.h3e.length === 0, bad.h3e.join('；'));
+  add('style-phrase', `分镜图风格短语统一（${style ? `${styleId}：${style.phrase}` : '预设无效'}）——同剧不许画风漂`, bad.style.length === 0, bad.style.join('；'));
+  add('prompt-english', '分镜图提示词全英文且非空', bad.english.length === 0, bad.english.join('；'));
+  add('prompt-no-names', '英文提示词不含角色名（分镜图提示词恒查；中文 H3 提示词放行）', bad.names.length === 0, banned.length ? bad.names.join('；') : SKIP_NAMES);
+  add('refs', '场次／人物／道具对账剧本', bad.refs.length === 0, script ? bad.refs.join('；') : SKIP_SCRIPT);
+
+  return gates;
+}
+
+/* ------------------------------------------------------------------ */
+/* validate                                                            */
+/* ------------------------------------------------------------------ */
+
+export function validateStoryboard(board, ctx = {}) {
+  const problems = [];
+  const p = (msg) => problems.push(msg);
+  if (!board || typeof board !== 'object') return ['storyboard.json 不是对象'];
+
+  if (!String(board.source ?? '').trim()) p('缺少 source（剧名）');
+  const eps = board.episodes;
+  if (!Array.isArray(eps) || eps.length === 0) {
+    p('episodes 为空');
+    return problems;
+  }
+  const seen = new Set();
+  for (const ep of eps) {
+    const label = `第 ${ep?.ep ?? '?'} 集`;
+    if (!Number.isInteger(ep?.ep) || ep.ep < 1) p(`${label}的 ep 必须是正整数`);
+    if (seen.has(ep?.ep)) p(`集号 ${ep.ep} 重复`);
+    seen.add(ep?.ep);
+    if (!Array.isArray(ep?.segments) || ep.segments.length === 0) {
+      p(`${label}没有段`);
+      continue;
+    }
+    for (const seg of ep.segments) {
+      const sid = seg?.id ?? '?';
+      if (typeof seg?.id !== 'string') p(`${label}有段缺 id`);
+      if (!Number.isInteger(seg?.sceneIndex) || seg.sceneIndex < 1) p(`${sid} 缺 sceneIndex（剧本里第几场）`);
+      if (typeof seg?.h3Prompt !== 'string') p(`${sid} 缺 h3Prompt（H3 视频提示词，写法见 references/h3-prompt.md）`);
+      if (!Array.isArray(seg?.cuts) || seg.cuts.length === 0) {
+        p(`${sid} 没有分镜`);
+        continue;
+      }
+      seg.cuts.forEach((cut, ci) => {
+        const cid = `${sid}#${ci + 1}`;
+        if (!Array.isArray(cut?.beats) || cut.beats.length !== 2) p(`${cid} 的 beats 必须是 [起, 止] 两个数`);
+        if (typeof cut?.seconds !== 'number') p(`${cid} 缺 seconds`);
+        if (!Array.isArray(cut?.characters)) p(`${cid} 缺 characters（空镜给空数组）`);
+        if (typeof cut?.frame !== 'string') p(`${cid} 缺 frame（分镜图英文提示词）`);
+      });
+    }
+  }
+
+  for (const g of gateReport(board, ctx)) {
+    if (!g.ok) p(`质量门未过：${g.label}${g.detail ? `（${g.detail}）` : ''}`);
+  }
+  return problems;
+}
+
+/* ------------------------------------------------------------------ */
+/* seed — 从 script.json 确定性预填                                      */
+/* ------------------------------------------------------------------ */
+
+export function seedFromScript(script, epRange = null) {
+  const expanded = expandScript(script);
+  const inRange = (n) => !epRange || (n >= epRange[0] && n <= epRange[1]);
+  const episodes = [];
+  for (const [epNo, sEp] of expanded) {
+    if (!inRange(epNo)) continue;
+    episodes.push({
+      ep: epNo,
+      segments: [],
+      seedScenes: sEp.scenes.map((sc) => ({
+        sceneIndex: sc.sceneIndex,
+        sceneId: sc.sceneId,
+        lighting: sc.lighting,
+        characters: sc.characters,
+        props: sc.props,
+        beats: sc.beats.map((b) => ({
+          n: b.n,
+          kind: b.kind,
+          seconds: b.seconds,
+          ...(b.speaker ? { speaker: b.speaker } : {}),
+          text: b.text,
+        })),
+      })),
+    });
+  }
+  return { source: script?.source ?? '', episodes };
+}
+
+/* ------------------------------------------------------------------ */
+/* export — H3 投产包                                                   */
+/* ------------------------------------------------------------------ */
+/*
+ * 固定投产结构：每段一个文件夹——E01-01/f1.png … fN.png + prompt.md
+ * （h3Prompt 原样），根部一份 manifest：按 Picture 序列出该段要挂的
+ * 分镜图路径、秒数、缺图标注。提示词就躺在图旁边，整个文件夹拖给
+ * H3 就是一次生成。纯函数返回文件清单，落盘在 CLI 层——可测性。
+ */
+export function exportPack(board, script, { imageExists = () => false, dir = '.' } = {}) {
+  const prefix = dir === '.' ? '' : `${dir}/`;
+  const files = [];
+  const manifest = [];
+  let missingTotal = 0;
+  for (const ep of board?.episodes ?? []) {
+    for (const seg of ep?.segments ?? []) {
+      // prompt.md 头部先说清哪个文件是首帧、每张图钉在第几秒——
+      // 分隔线以下是 h3Prompt 原样，整段复制就能用
+      const starts = cutStarts(seg.cuts);
+      const mapping = (seg.cuts ?? [])
+        .map((_, i) => `- Picture ${i + 1} = f${i + 1}.png${i === 0 ? '（**首帧**，钉 0.00 秒）' : `（钉 ${starts[i].toFixed(2)} 秒）`}`)
+        .join('\n');
+      const promptMd = `# ${seg.id} · H3 提示词\n\n首帧 = **f1.png**。图片按 Picture 序号挂载：\n\n${mapping}\n\n---\n\n${seg.h3Prompt ?? ''}\n`;
+      files.push({ path: `${prefix}${seg.id}/prompt.md`, content: promptMd });
+      const pictures = (seg.cuts ?? []).map((_, i) => `${prefix}${seg.id}/f${i + 1}.png`);
+      const missing = pictures.filter((rel) => !imageExists(rel));
+      missingTotal += missing.length;
+      manifest.push({
+        segment: seg.id,
+        seconds: segSeconds(seg),
+        cuts: (seg.cuts ?? []).length,
+        cutStarts: cutStarts(seg.cuts),
+        prompt: `${prefix}${seg.id}/prompt.md`,
+        pictures,
+        missing,
+      });
+    }
+  }
+  files.push({ path: `${prefix}manifest.json`, content: JSON.stringify(manifest, null, 2) + '\n' });
+  return { files, manifest, missingTotal };
+}
+
+/* ------------------------------------------------------------------ */
+/* slug                                                                */
+/* ------------------------------------------------------------------ */
+
+export function slug(name) {
+  const cleaned = String(name)
+    .trim()
+    .replace(/[\s/\\:*?"<>|·]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return cleaned || 'storyboard';
+}
+
+/* ------------------------------------------------------------------ */
+/* render — 界面文案                                                    */
+/* ------------------------------------------------------------------ */
+
+const T = {
+  kicker: '分镜',
+  docTitle: (s, a, b) => `${s} · 分镜${a === b ? `（第 ${a} 集）` : `（第 ${a}–${b} 集）`}`,
+  exportJson: '导出 JSON',
+  gatesPass: '全部通过',
+  gatesFail: (n) => `${n} 项未过`,
+  gatePill: (okN, total) => `质量门 ${okN} / ${total}`,
+  kpi: {
+    segments: '生成段', segmentsSub: (cap) => `一段一次调用，上限 ${cap} 秒`,
+    cuts: '分镜', cutsSub: (avg) => `平均 ${avg} 秒一切`,
+    time: '预估总时长', timeSub: (t) => `目标 ${t}`,
+    batches: '生成批次', batchesSub: '同场景同光照共用环境参考图',
+    lines: '台词段', linesSub: '其余是纯画面段',
+  },
+  secRhythm: '分镜节奏带',
+  secSegments: '分集分镜表',
+  secBatches: '生成批次单',
+  secDialogue: '配音对齐单',
+  secGates: '质量门',
+  rhythmNote: '粗分隔 = 生成段边界 · 段宽 = 分镜时长占比 · 颜色越深景别越近',
+  segmentsNote: '一段 = 一次生成：主分镜图钉 0.00 秒，子分镜图钉各自切点',
+  batchesNote: '自动汇总 · 同批段共用同一张环境参考图',
+  dialogueNote: '自动汇总 · TTS 音频对到哪一段的第几切',
+  epHead: (nSeg, nCut, total, target) => `${nSeg} 段 ${nCut} 切 · 共 ${total} 秒 / 目标 ${target} 秒`,
+  segHead: (total, n) => `${total} 秒 · ${n} 个分镜`,
+  beatsLabel: (s, from, to) => `第 ${s} 场 ${from === to ? `第 ${from} 拍` : `第 ${from}–${to} 拍`}`,
+  masterLabel: '主分镜图',
+  subLabel: (i) => `子分镜 ${i}`,
+  frameMissing: (i) => `#${i} 未生成`,
+  framePrompt: '分镜图提示词',
+  h3Prompt: 'H3 提示词',
+  h3Section: 'H3 视频提示词',
+  showSegs: '▾ 展开全部段',
+  hideSegs: '▴ 收起',
+  copy: '复制', copied: '已复制', copyFailed: '复制失败',
+  dialogueCols: ['段 · 切', '说话人', '台词', '台词秒数'],
+  atSec: (t) => `${t.toFixed(2)}s 起`,
+  colophon: '分镜由模型依据剧本切分：段 = 一次生成（≤15 秒），分镜 = 段内 2–5 秒的剪切，每个分镜一张关键帧图。对齐指令、切点时刻、台词、提示词纪律全部由脚本确定性对账。分镜图出图走 codex，环境与角色设定图当参考图。',
+};
+
+/* ------------------------------------------------------------------ */
+/* render 公共                                                          */
+/* ------------------------------------------------------------------ */
+
+const esc = (s) =>
+  String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+function namer(ctx = {}) {
+  const charName = new Map((ctx.outline?.characters ?? []).map((c) => [c.id, c.name]));
+  const sceneName = new Map((ctx.art?.scenes ?? []).map((s) => [s.id, s.name]));
+  const propName = new Map((ctx.art?.props ?? []).map((p) => [p.id, p.name]));
+  return {
+    char: (id) => (id === 'VO' ? '画外音' : charName.get(id) ?? id),
+    scene: (id) => sceneName.get(id) ?? id,
+    prop: (id) => propName.get(id) ?? id,
+  };
+}
+
+/** 分镜认领的节拍 → 画面摘要（动作原文 + 台词行），模型不重写。 */
+function cutBeats(cut, scene) {
+  if (!scene) return [];
+  const [from, to] = cut.beats ?? [];
+  return scene.beats.slice((from ?? 1) - 1, to ?? 0);
+}
+
+/* ------------------------------------------------------------------ */
+/* render — markdown                                                   */
+/* ------------------------------------------------------------------ */
+
+const mdRow = (cells) => `| ${cells.map((c) => String(c ?? '').replace(/\|/g, '\\|')).join(' | ')} |`;
+const mdHead = (cols) => [mdRow(cols), mdRow(cols.map(() => '---'))].join('\n');
+
+export function renderMarkdown(board, ctx = {}) {
+  const t = T;
+  const n = namer(ctx);
+  const expanded = expandScript(ctx.script);
+  const stats = computeStats(board, ctx.script);
+  const eps = board.episodes;
+  const out = [`# ${t.docTitle(board.source, eps[0]?.ep, eps[eps.length - 1]?.ep)}`, ''];
+
+  for (const [i, ep] of eps.entries()) {
+    const st = stats.episodes[i];
+    const sEp = expanded.get(ep.ep);
+    out.push(`## E${String(ep.ep).padStart(2, '0')}`, '', `> ${t.epHead(st.segments, st.cuts, st.totalSeconds, st.target)}`, '');
+    for (const seg of ep.segments) {
+      const scene = sEp?.scenes?.[seg.sceneIndex - 1];
+      out.push(`### ${seg.id} · ${scene ? `${n.scene(scene.sceneId)}${scene.lighting ? `（${scene.lighting}）` : ''}` : '?'} · ${t.segHead(segSeconds(seg), seg.cuts.length)}`, '');
+      out.push(mdHead(['切', '起点', '秒', '景别', '运镜', '画面', '人物']));
+      const starts = cutStarts(seg.cuts);
+      seg.cuts.forEach((cut, ci) => {
+        const summary = cutBeats(cut, scene)
+          .map((b) => (b.kind === 'line' ? `${n.char(b.speaker)}：「${b.text}」` : b.text))
+          .join(' ');
+        out.push(mdRow([
+          `#${ci + 1}`, `${starts[ci].toFixed(2)}s`, cut.seconds,
+          SHOT_SIZES[cut.size]?.zh ?? cut.size, `${cut.camera}（${CAMERA_MOVES[cut.camera] ?? '?'}）`,
+          summary, (cut.characters ?? []).map(n.char).join('、'),
+        ]));
+      });
+      out.push('', `**${t.h3Section}**`, '', '```text', seg.h3Prompt ?? '', '```', '');
+    }
+  }
+
+  out.push(`## ${t.secBatches}`, '', mdHead(['场景', '光照', '段', '需要的角色', '道具']));
+  for (const b of stats.batches) {
+    out.push(mdRow([`${b.sceneId} ${n.scene(b.sceneId)}`, b.lighting, b.segments.join('、'), b.characters.map(n.char).join('、'), b.props.map(n.prop).join('、')]));
+  }
+  out.push('', `## ${t.secDialogue}`, '', mdHead(t.dialogueCols));
+  for (const d of stats.dialogue) out.push(mdRow([`${d.segment}#${d.cut}`, n.char(d.speaker), d.line, d.seconds]));
+  out.push('');
+  return out.join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* render — html                                                       */
+/* ------------------------------------------------------------------ */
+/*
+ * 与另外四份报告同一套视觉语言。设计约定见 references/report-style.md。
+ * 分镜图从 ./images/<段号>-f<切序>.png 找（相对 render 时的工作目录），
+ * 有就内嵌显示 + 点击放大，没有就显示占位——不猜、不骗。
+ */
+
+function embedDoc(doc) {
+  return JSON.stringify(doc).replace(/</g, '\\u003c');
+}
+
+export function renderHtml(board, ctx = {}) {
+  const t = T;
+  const n = namer(ctx);
+  const expanded = expandScript(ctx.script);
+  const stats = computeStats(board, ctx.script);
+  const gates = gateReport(board, ctx);
+  const failed = gates.filter((g) => !g.ok);
+  const eps = board.episodes;
+  const params = stats.params;
+  const fmtMin = (sec) => `${Math.floor(sec / 60)} 分 ${Math.round(sec % 60)} 秒`;
+
+  const SIZE_ALPHA = { 'extreme-wide': 0.25, wide: 0.4, medium: 0.58, close: 0.78, 'extreme-close': 1 };
+
+  // ---- 01 分镜节奏带：段是粗分隔的组，组内每个分镜一段色块 ----
+  const rhythmRows = eps
+    .map((ep, i) => {
+      const st = stats.episodes[i];
+      const groups = ep.segments
+        .map((seg) => {
+          const segs = seg.cuts
+            .map((cut, ci) => {
+              const w = st.totalSeconds ? (cut.seconds / st.totalSeconds) * 100 : 0;
+              const alpha = SIZE_ALPHA[cut.size] ?? 0.5;
+              return `<a class="seg" href="#seg-${esc(seg.id)}" style="width:${r1(w)}%;background:rgba(138,51,36,${alpha})" title="${esc(`${seg.id}#${ci + 1} · ${cut.seconds}s · ${SHOT_SIZES[cut.size]?.zh ?? ''} · ${cut.camera}`)}"></a>`;
+            })
+            .join('');
+          const gw = st.totalSeconds ? (segSeconds(seg) / st.totalSeconds) * 100 : 0;
+          return `<span class="rseg" style="width:${r1(gw)}%">${segs}</span>`;
+        })
+        .join('');
+      return `<div class="rrow"><span class="rep">E${String(ep.ep).padStart(2, '0')}</span><div class="rtrack">${groups}</div><span class="rval">${st.segments} 段 ${st.cuts} 切 · ${st.totalSeconds}s</span></div>`;
+    })
+    .join('\n');
+  const rhythmLegend = Object.entries(SHOT_SIZES)
+    .map(([k, v]) => `<i><span class="sw" style="background:rgba(138,51,36,${SIZE_ALPHA[k]})"></span>${esc(v.zh)}</i>`)
+    .join('');
+
+  // ---- 02 分集分镜表：段卡（主分镜图 + 子分镜条 + 分镜行） ----
+  const epBlocks = eps
+    .map((ep, i) => {
+      const st = stats.episodes[i];
+      const sEp = expanded.get(ep.ep);
+      const cards = ep.segments
+        .map((seg) => {
+          const scene = sEp?.scenes?.[seg.sceneIndex - 1];
+          const starts = cutStarts(seg.cuts);
+          const frame = (ci) => `${seg.id}/f${ci + 1}.png`;
+          const has = (ci) => (ctx.imageExists ? ctx.imageExists(frame(ci)) : false);
+
+          const master = has(0)
+            ? `<img class="frame" src="${esc(frame(0))}" alt="${esc(`${seg.id}#1`)}" loading="lazy">`
+            : `<div class="frame ph"><b>${esc(t.masterLabel)} · ${esc(t.frameMissing(1))}</b><span>${esc(seg.cuts[0]?.frame ?? '')}</span></div>`;
+          const subs = seg.cuts.length > 1
+            ? `<div class="subs">${seg.cuts
+                .slice(1)
+                .map((cut, ci) =>
+                  has(ci + 1)
+                    ? `<img class="subf" src="${esc(frame(ci + 1))}" alt="${esc(`${seg.id}#${ci + 2}`)}" loading="lazy">`
+                    : `<span class="subf ph">${esc(t.frameMissing(ci + 2))}</span>`,
+                )
+                .join('')}</div>`
+            : '';
+
+          const cutRows = seg.cuts
+            .map((cut, ci) => {
+              const beats = cutBeats(cut, scene);
+              const summary = beats
+                .map((b) =>
+                  b.kind === 'line'
+                    ? `<p class="sline"><b>${esc(n.char(b.speaker))}</b>${esc(b.text)}</p>`
+                    : `<p class="sact">${esc(b.text)}</p>`,
+                )
+                .join('');
+              return `<li class="cut">
+  <div class="cut-h">
+    <b>#${ci + 1}</b>
+    <span class="cut-t">${esc(t.atSec(starts[ci]))} · ${cut.seconds}s</span>
+    <span class="cut-sc">${esc(SHOT_SIZES[cut.size]?.zh ?? cut.size)} · ${esc(cut.camera)}</span>
+    ${(cut.characters ?? []).map((id) => `<span class="chip">${esc(n.char(id))}</span>`).join('')}
+    ${(cut.props ?? []).map((id) => `<span class="chip prop">${esc(n.prop(id))}</span>`).join('')}
+    <button class="copy mini" data-copy="${esc(cut.frame ?? '')}">${esc(t.framePrompt)}</button>
+  </div>
+  ${summary}
+</li>`;
+            })
+            .join('\n');
+
+          return `<article class="segcard" id="seg-${esc(seg.id)}">
+  <header class="seg-h">
+    <b>${esc(seg.id)}</b>
+    <span class="sec-badge">${segSeconds(seg)}s · ${seg.cuts.length} 切</span>
+    <span class="chip">${esc(scene ? `${scene.sceneId} ${n.scene(scene.sceneId)}` : '?')}</span>
+    ${scene?.lighting ? `<span class="chip lite">${esc(scene.lighting)}</span>` : ''}
+    <span class="beatsref">${esc(t.beatsLabel(seg.sceneIndex, seg.cuts[0]?.beats?.[0], seg.cuts[seg.cuts.length - 1]?.beats?.[1]))}</span>
+  </header>
+  ${master}
+  ${subs}
+  <div class="duo">
+    <ol class="cuts">
+${cutRows}
+    </ol>
+    <div class="ppanel">
+      <div class="pp-h">
+        <b>${esc(t.h3Prompt)}</b>
+        <button class="copy" data-copy="${esc(seg.h3Prompt ?? '')}">${esc(t.copy)}</button>
+      </div>
+      <pre class="pp on">${esc(seg.h3Prompt ?? '')}</pre>
+    </div>
+  </div>
+  ${seg.note ? `<p class="seg-note">${esc(seg.note)}</p>` : ''}
+</article>`;
+        })
+        .join('\n');
+      return `<section class="ep" id="ep-${ep.ep}">
+  <header class="ep-h">
+    <span class="ep-n">E${String(ep.ep).padStart(2, '0')}</span>
+    <span class="ep-est">${esc(t.epHead(st.segments, st.cuts, st.totalSeconds, st.target))}</span>
+  </header>
+  <div class="shots clip">
+    <div class="seggrid">
+${cards}
+    </div>
+  </div>
+  <button class="shmore">${esc(t.showSegs)}</button>
+</section>`;
+    })
+    .join('\n');
+
+  // ---- 03 生成批次单 ----
+  const batchCards = stats.batches
+    .map((b, i) => {
+      const sheet = `images/${slug(n.scene(b.sceneId))}-sheet.png`;
+      const hasSheet = ctx.imageExists ? ctx.imageExists(sheet) : false;
+      return `<article class="batch">
+  ${hasSheet ? `<img class="bimg" src="${esc(sheet)}" alt="${esc(n.scene(b.sceneId))}" loading="lazy">` : ''}
+  <header class="batch-h"><b>批次 ${String(i + 1).padStart(2, '0')}</b><span class="chip">${esc(`${b.sceneId} ${n.scene(b.sceneId)}`)}</span>${b.lighting ? `<span class="chip lite">${esc(b.lighting)}</span>` : ''}</header>
+  <div class="batch-shots">${b.segments.map((s) => `<a class="chip mono" href="#seg-${esc(s)}">${esc(s)}</a>`).join('')}</div>
+  <p class="batch-need">${esc(`需要：${b.characters.length ? b.characters.map(n.char).join('、') + ' 的角色设定图' : '无角色（空镜）'}${b.props.length ? ' · ' + b.props.map(n.prop).join('、') : ''}`)}</p>
+</article>`;
+    })
+    .join('\n');
+
+  // ---- 04 配音对齐单 ----
+  const dlgRows = stats.dialogue
+    .map((d) => `<tr><td><a href="#seg-${esc(d.segment)}">${esc(d.segment)}</a> #${d.cut}</td><td>${esc(n.char(d.speaker))}</td><td class="serif">${esc(d.line)}</td><td>${d.seconds}</td></tr>`)
+    .join('\n');
+
+  const gateList = `<ul class="gate">
+  ${gates
+    .map(
+      (g) => `<li class="${g.ok ? 'ok' : 'bad'}"><span class="m">${g.ok ? '✓' : '✗'}</span><span>${esc(g.label)}${
+        (!g.ok && g.detail) || (g.ok && g.detail.includes('跳过')) ? `<small>${esc(g.detail)}</small>` : ''
+      }</span></li>`,
+    )
+    .join('\n  ')}
+</ul>`;
+
+  return `<!doctype html>
+<html lang="zh"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${esc(t.docTitle(board.source, eps[0]?.ep, eps[eps.length - 1]?.ep))}</title>
+<style>
+:root{
+  --paper:#eceded; --panel:#f5f6f5; --side:#e4e6e3; --ink:#191d21; --ink-2:#5b636a; --ink-3:#8c9298;
+  --rule:#d2d5d0; --rule-2:#c2c6bf; --seal:#8a3324; --seal-2:#c56a4e; --seal-soft:#8a332412; --ok:#3d6b4f;
+  --serif:"Songti SC","STSong","Source Han Serif SC","Noto Serif CJK SC",Georgia,serif;
+  --sans:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:14px/1.7 var(--sans);-webkit-font-smoothing:antialiased}
+.page{max-width:1600px;margin:0 auto;padding:24px 32px 90px}
+h1,h2,h3{margin:0;font-weight:400}
+
+.hd{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;border-bottom:2px solid var(--ink);padding-bottom:12px}
+.hd h1{font:400 28px/1.1 var(--serif);letter-spacing:.06em}
+.hd .sub{font-size:13px;color:var(--ink-2)}
+.hd .right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.gatepill{display:inline-flex;align-items:center;gap:6px;font:500 12px/1 var(--sans);border-radius:99px;padding:6px 12px}
+.gatepill.pass{color:var(--ok);border:1px solid var(--ok)}
+.gatepill.fail{color:var(--seal);border:1px solid var(--seal);background:var(--seal-soft)}
+.expo{font:500 11px/1 var(--sans);color:var(--ink-2);background:var(--panel);
+  border:1px solid var(--rule-2);border-radius:2px;padding:7px 11px;cursor:pointer;transition:.15s}
+.expo:hover{border-color:var(--seal);color:var(--seal)}
+.expo:focus-visible{outline:2px solid var(--seal);outline-offset:2px}
+
+.kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin:18px 0 6px}
+@media(max-width:980px){.kpis{grid-template-columns:repeat(2,1fr)}}
+.kpi{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:11px 14px 9px}
+.kpi .l{font:500 10px/1 var(--sans);letter-spacing:.18em;color:var(--ink-3)}
+.kpi .v{font:400 28px/1.15 var(--serif);margin-top:5px}
+.kpi .v small{font:400 14px var(--serif);color:var(--ink-2)}
+.kpi .d{font-size:11px;color:var(--ink-2);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kpi.accent{border-top:2px solid var(--seal)}
+.galert{margin:14px 0 0;border:1px solid var(--seal);background:var(--seal-soft);border-radius:2px;
+  padding:10px 14px;font-size:13px}
+.galert b{color:var(--seal)}
+.galert span{display:block;font-size:12px;color:var(--ink-2)}
+
+section.top-sec{margin-top:34px}
+.sec-h{display:flex;align-items:baseline;gap:12px;border-bottom:1px solid var(--rule-2);padding-bottom:8px;margin-bottom:16px}
+.sec-h .no{font:500 12px/1 var(--mono);color:var(--seal)}
+.sec-h h2{font:400 20px/1.2 var(--serif);letter-spacing:.05em}
+.sec-h .note{margin-left:auto;font-size:12px;color:var(--ink-3)}
+
+/* 01 分镜节奏带 */
+.rhythm{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:16px 20px 10px}
+.rrow{display:grid;grid-template-columns:44px minmax(0,1fr) 150px;gap:12px;align-items:center;padding:5px 0}
+.rep{font:500 12px/1 var(--mono);color:var(--ink-2)}
+.rtrack{display:flex;height:22px;border:1px solid var(--rule);border-radius:2px;overflow:hidden;background:var(--paper)}
+.rseg{display:flex;border-right:2px solid var(--ink-2)}
+.rseg:last-child{border-right:0}
+.seg{display:block;border-right:1px solid var(--panel)}
+.rseg .seg:last-child{border-right:0}
+.seg:hover{outline:2px solid var(--ink);outline-offset:-2px}
+.rval{font:500 12px/1.5 var(--sans);color:var(--ink-2)}
+.legend{display:flex;gap:16px;font-size:12px;color:var(--ink-2);margin:8px 0 2px;flex-wrap:wrap}
+.legend i{font-style:normal;display:inline-flex;align-items:center;gap:6px}
+.sw{display:inline-block;width:10px;height:10px;border-radius:2px}
+
+/* 02 分集分镜表 */
+.ep{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:18px 22px;margin-bottom:16px}
+.ep-h{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--rule-2);padding-bottom:10px;margin-bottom:14px}
+.ep-n{font:400 22px/1 var(--serif);letter-spacing:.04em;color:var(--seal)}
+.ep-est{font-size:12.5px;color:var(--ink-2)}
+.shots{position:relative}
+.shots.clip{max-height:760px;overflow:hidden}
+.shots.clip::after{content:'';position:absolute;left:0;right:0;bottom:0;height:80px;
+  background:linear-gradient(180deg,transparent,var(--panel));pointer-events:none}
+.shmore{display:block;width:100%;margin-top:8px;font:500 11.5px/1 var(--sans);letter-spacing:.06em;
+  color:var(--ink-2);background:var(--paper);border:1px solid var(--rule-2);border-radius:2px;
+  padding:7px 0;cursor:pointer;transition:.15s}
+.shmore:hover{border-color:var(--seal);color:var(--seal)}
+.shmore:focus-visible{outline:2px solid var(--seal);outline-offset:2px}
+.seggrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+@media(max-width:1100px){.seggrid{grid-template-columns:minmax(0,1fr)}}
+.segcard{background:var(--paper);border:1px solid var(--rule);border-radius:2px;padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.seg-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.seg-h b{font:500 14px/1 var(--mono);color:var(--seal)}
+.sec-badge{font:500 11px/1 var(--mono);border:1px solid var(--seal);color:var(--seal);border-radius:99px;padding:2px 8px}
+.beatsref{margin-left:auto;font-size:10.5px;color:var(--ink-3)}
+.frame{width:100%;aspect-ratio:16/9;object-fit:cover;border:1px solid var(--rule-2);border-radius:2px;
+  cursor:zoom-in;display:block;background:var(--side)}
+.frame.ph{display:flex;flex-direction:column;gap:6px;padding:10px 12px;cursor:default;overflow:hidden}
+.frame.ph b{font:500 10px/1 var(--sans);letter-spacing:.14em;color:var(--ink-3)}
+.frame.ph span{font:400 10.5px/1.55 var(--mono);color:var(--ink-2);overflow:hidden;display:-webkit-box;
+  -webkit-line-clamp:5;-webkit-box-orient:vertical}
+.subs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px}
+.subf{width:100%;aspect-ratio:16/9;object-fit:cover;border:1px solid var(--rule-2);border-radius:2px;
+  cursor:zoom-in;display:block;background:var(--side)}
+.subf.ph{display:flex;align-items:center;justify-content:center;cursor:default;
+  font:500 10px/1 var(--sans);color:var(--ink-3);letter-spacing:.08em}
+.duo{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start;border-top:1px solid var(--rule);padding-top:4px}
+@media(max-width:900px){.duo{grid-template-columns:minmax(0,1fr)}}
+.ppanel{border:1px solid var(--rule);border-radius:2px;background:var(--panel);margin-top:7px}
+.pp-h{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid var(--rule)}
+.pp-h b{font:500 11px/1 var(--sans);letter-spacing:.08em;color:var(--ink-2);margin-right:auto}
+.pp{display:none;margin:0;padding:9px 12px;font:400 12px/1.8 var(--sans);color:var(--ink);
+  white-space:pre-wrap;word-break:break-word;max-height:400px;overflow-y:auto;
+  scrollbar-width:thin;scrollbar-color:var(--rule-2) transparent}
+.pp.on{display:block}
+.pp::-webkit-scrollbar{width:6px}
+.pp::-webkit-scrollbar-thumb{background:var(--rule-2);border-radius:3px}
+.cuts{margin:0;padding:0;list-style:none}
+.cut{padding:7px 0;border-bottom:1px solid var(--rule)}
+.cut:first-child{padding-top:11px}
+.cut:last-child{border-bottom:0}
+.cut-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.cut-h b{font:500 12px/1 var(--mono);color:var(--seal)}
+.cut-t{font:500 10.5px/1.6 var(--mono);color:var(--ink-3)}
+.cut-sc{font-size:11.5px;color:var(--ink-2)}
+.cut-h .copy{margin-left:auto;opacity:0;transition:.15s}
+.cut:hover .copy{opacity:1}
+.cut p{margin:3px 0 0;font-size:12px;line-height:1.6}
+.sact{color:var(--ink-2)}
+.sline{font-family:var(--serif)}
+.sline b{font-weight:500;margin-right:6px;color:var(--seal)}
+.chip{font:400 10.5px/1.6 var(--mono);border:1px solid var(--rule-2);border-radius:2px;
+  padding:0 6px;background:var(--panel);color:var(--ink-2);text-decoration:none}
+.chip.lite{border-color:var(--seal-2);color:var(--seal-2)}
+.chip.prop{border-color:var(--seal);color:var(--seal)}
+.chip.mono{font-family:var(--mono)}
+a.chip:hover{border-color:var(--seal);color:var(--seal)}
+.prompts{display:flex;gap:6px}
+.seg-note{margin:0;font-size:11px;color:var(--ink-3)}
+
+/* 03 生成批次单 */
+.batches{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+@media(max-width:1100px){.batches{grid-template-columns:minmax(0,1fr)}}
+.batch{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:14px 18px}
+.bimg{width:100%;aspect-ratio:16/9;object-fit:cover;border:1px solid var(--rule-2);border-radius:2px;
+  cursor:zoom-in;display:block;margin-bottom:10px}
+.batch-h{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.batch-h b{font:500 13px var(--serif);letter-spacing:.06em}
+.batch-shots{display:flex;flex-wrap:wrap;gap:5px;margin-top:8px}
+.batch-need{margin:8px 0 0;font-size:12px;color:var(--ink-2)}
+
+/* 04 配音对齐单 */
+table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--rule);font-size:13px}
+th,td{padding:8px 12px;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{font:500 11px/1 var(--sans);letter-spacing:.1em;color:var(--ink-3);background:var(--side)}
+tr:last-child td{border-bottom:0}
+td:first-child{font-family:var(--mono);font-size:12px;white-space:nowrap}
+td a{color:var(--seal);text-decoration:none}
+td.serif{font-family:var(--serif)}
+
+.copy{flex:none;font:500 11px/1 var(--sans);color:var(--ink-2);background:var(--panel);
+  border:1px solid var(--rule-2);border-radius:2px;padding:5px 10px;cursor:pointer;transition:.15s}
+.copy:hover{border-color:var(--seal);color:var(--seal)}
+.copy:focus-visible{outline:2px solid var(--seal);outline-offset:2px}
+.copy[data-done]{border-color:var(--seal);color:var(--seal)}
+.copy.mini{padding:3px 7px;font-size:10px}
+.copy.h3{border-color:var(--seal-2);color:var(--seal-2);width:100%}
+.copy.h3:hover,.copy.h3[data-done]{border-color:var(--seal);color:var(--seal)}
+
+.gate{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:2px 28px}
+@media(max-width:900px){.gate{grid-template-columns:1fr}}
+.gate li{display:flex;gap:8px;padding:5px 0;font-size:12.5px;line-height:1.55}
+.gate .m{flex:none;font-weight:700}
+.gate li.ok .m{color:var(--ok)}
+.gate li.bad .m{color:var(--seal)}
+.gate li.bad{background:var(--seal-soft);border-radius:2px;padding-left:6px}
+.gate small{display:block;color:var(--ink-3)}
+.gsum{margin:10px 0 0;font-size:12px;color:var(--ink-2)}
+.gsum b{color:var(--seal)}
+
+.lightbox{position:fixed;inset:0;background:rgba(20,22,24,.88);display:none;align-items:center;
+  justify-content:center;z-index:9;cursor:zoom-out;padding:32px}
+.lightbox.on{display:flex}
+.lightbox img{max-width:96%;max-height:96%;border:1px solid #555;border-radius:2px}
+
+.foot{margin-top:40px;font-size:11px;color:var(--ink-3);border-top:1px solid var(--rule);padding-top:14px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+@media print{
+  .expo,.copy,.shmore{display:none!important}
+  .pp{max-height:none;overflow:visible}
+  .duo{grid-template-columns:minmax(0,1fr)}
+  .shots.clip{max-height:none}
+  .shots.clip::after{display:none}
+  .seggrid,.batches{grid-template-columns:minmax(0,1fr)}
+  .page{max-width:none;padding:0}
+  section.top-sec,.segcard,.batch{page-break-inside:avoid}
+  body{background:#fff}
+}
+</style></head><body>
+<div class="page">
+
+<header class="hd">
+  <h1>${esc(board.source)}</h1>
+  <span class="sub">${esc(t.kicker)}${eps[0]?.ep === eps[eps.length - 1]?.ep ? ` · 第 ${eps[0]?.ep} 集` : ` · 第 ${eps[0]?.ep}–${eps[eps.length - 1]?.ep} 集`}</span>
+  <span class="right">
+    <span class="gatepill ${failed.length ? 'fail' : 'pass'}">${failed.length ? '✗' : '✓'} ${esc(t.gatePill(gates.length - failed.length, gates.length))}</span>
+    <button class="expo" data-name="${esc(slug(board.source))}-storyboard.json">${esc(t.exportJson)}</button>
+  </span>
+</header>
+
+<div class="kpis">
+  <div class="kpi accent"><div class="l">${esc(t.kpi.segments)}</div><div class="v">${stats.totals.segments} <small>段</small></div><div class="d">${esc(t.kpi.segmentsSub(params.maxSegmentSeconds))}</div></div>
+  <div class="kpi"><div class="l">${esc(t.kpi.cuts)}</div><div class="v">${stats.totals.cuts} <small>切</small></div><div class="d">${esc(t.kpi.cutsSub(stats.totals.avgCutSeconds))}</div></div>
+  <div class="kpi"><div class="l">${esc(t.kpi.time)}</div><div class="v">${esc(fmtMin(stats.totals.seconds))}</div><div class="d">${esc(t.kpi.timeSub(fmtMin(stats.totals.targetSeconds)))}</div></div>
+  <div class="kpi"><div class="l">${esc(t.kpi.batches)}</div><div class="v">${stats.batches.length}</div><div class="d">${esc(t.kpi.batchesSub)}</div></div>
+  <div class="kpi"><div class="l">${esc(t.kpi.lines)}</div><div class="v">${stats.totals.withLines} <small>段</small></div><div class="d">${esc(t.kpi.linesSub)}</div></div>
+</div>
+${failed.length ? `<div class="galert"><b>✗ ${esc(t.gatesFail(failed.length))}</b>${failed.map((g) => `<span>${esc(g.label)}${g.detail ? ` — ${esc(g.detail)}` : ''}</span>`).join('')}</div>` : ''}
+
+<section class="top-sec" id="sec-rhythm">
+  <div class="sec-h"><span class="no">01</span><h2>${esc(t.secRhythm)}</h2><span class="note">${esc(t.rhythmNote)}</span></div>
+  <div class="rhythm">
+    <div class="legend">${rhythmLegend}</div>
+${rhythmRows}
+  </div>
+</section>
+
+<section class="top-sec" id="sec-segments">
+  <div class="sec-h"><span class="no">02</span><h2>${esc(t.secSegments)}</h2><span class="note">${esc(t.segmentsNote)}</span></div>
+${epBlocks}
+</section>
+
+<section class="top-sec" id="sec-batches">
+  <div class="sec-h"><span class="no">03</span><h2>${esc(t.secBatches)}</h2><span class="note">${esc(t.batchesNote)}</span></div>
+  <div class="batches">
+${batchCards}
+  </div>
+</section>
+
+<section class="top-sec" id="sec-dialogue">
+  <div class="sec-h"><span class="no">04</span><h2>${esc(t.secDialogue)}</h2><span class="note">${esc(t.dialogueNote)}</span></div>
+  <table><thead><tr>${t.dialogueCols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+  <tbody>
+${dlgRows}
+  </tbody></table>
+</section>
+
+<section class="top-sec" id="sec-gates">
+  <div class="sec-h"><span class="no">05</span><h2>${esc(t.secGates)}</h2></div>
+  ${gateList}
+  <p class="gsum">${failed.length ? `<b>${esc(t.gatesFail(failed.length))}</b>` : esc(t.gatesPass)}</p>
+</section>
+
+<p class="foot">${esc(t.colophon)}</p>
+</div>
+
+<div class="lightbox" id="lightbox"><img alt=""></div>
+
+<script type="application/json" id="storyboard-data">${embedDoc(board)}</script>
+<script>
+const L = ${JSON.stringify({ copied: T.copied, failed: T.copyFailed, show: T.showSegs, hide: T.hideSegs })};
+
+// 分集分镜表：段卡区默认最多 760px。不超高的集直接放开；超高的集点开/收起
+document.querySelectorAll('.shmore').forEach((btn) => {
+  const zone = btn.previousElementSibling;
+  if (zone.scrollHeight <= 780) {
+    zone.classList.remove('clip');
+    btn.remove();
     return;
   }
-  if (html) {
-    const out = renderHtml(doc, ctx);
-    if (opts.out) writeFileSync(resolve(opts.out), out);
-    else process.stdout.write(out + '\n');
-  } else {
-    const out = renderMarkdown(doc, ctx);
-    if (opts.out) writeFileSync(resolve(opts.out), out);
-    else process.stdout.write(out + '\n');
+  btn.addEventListener('click', () => {
+    const clipped = zone.classList.toggle('clip');
+    btn.textContent = clipped ? L.show : L.hide;
+    if (clipped) zone.closest('.ep').scrollIntoView({ block: 'nearest' });
+  });
+});
+
+// 点图放大（主分镜图 / 子分镜图 / 批次场景图）
+const lb = document.getElementById('lightbox');
+document.addEventListener('click', (e) => {
+  const img = e.target.closest('img.frame, img.subf, img.bimg');
+  if (img) {
+    lb.querySelector('img').src = img.src;
+    lb.classList.add('on');
+    return;
   }
-  // --all：与 HTML 同目录一次性产出 Prompt 平铺包（生产用）。
-  // JSON 即输入文件本身（Agent 用），无需再写；此处只补 prompts。
-  if (opts.all) {
-    const outBase = opts.out
-      ? join(dirname(resolve(opts.out)), 'prompts')   // 与 HTML 同目录下的 prompts/
-      : resolve(process.cwd(), 'prompts');
-    cmdExport([p, '--cast', opts.cast || '', '--art', opts.art || '', '--out', outBase].filter(Boolean));
-    console.error(`✓ 三件套已就位：\n  · JSON  (Agent 用) : ${resolve(p)}\n  · HTML  (人审用)   : ${opts.out ? resolve(opts.out) : '(stdout)'}\n  · Prompts(生产用)  : ${outBase}`);
+  if (e.target.closest('#lightbox')) lb.classList.remove('on');
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') lb.classList.remove('on');
+});
+
+// 复制提示词
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.copy');
+  if (!btn) return;
+  e.preventDefault();
+  const label = btn.textContent;
+  try {
+    await navigator.clipboard.writeText(btn.dataset.copy);
+    btn.textContent = L.copied;
+    btn.dataset.done = '1';
+  } catch {
+    btn.textContent = L.failed;
   }
+  setTimeout(() => { btn.textContent = label; delete btn.dataset.done; }, 1600);
+});
+
+// 导出：报告自己带着完整的 storyboard.json，下载的是它原样
+document.querySelector('.expo').addEventListener('click', (e) => {
+  const btn = e.currentTarget;
+  const url = URL.createObjectURL(
+    new Blob([document.getElementById('storyboard-data').textContent], { type: 'application/json' }),
+  );
+  const a = Object.assign(document.createElement('a'), { href: url, download: btn.dataset.name });
+  a.click();
+  // 别立刻回收——Safari 会抢在下载读完之前撤掉 blob
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+});
+</script>
+</body></html>`;
 }
 
-function cmdBatches(args) {
-  const { pos, opts } = parseArgs(args);
-  const p = pos[0];
-  if (!p) { console.error('用法: batches <storyboard.json>'); process.exit(2); }
-  const doc = readDoc(p);
-  const stats = computeStats(doc);
-  for (const b of stats.batches) console.log(`${b.id}\t×${b.count}\t${b.shotIds.join(', ')}`);
+/* ------------------------------------------------------------------ */
+/* CLI                                                                 */
+/* ------------------------------------------------------------------ */
+
+const USAGE = `novel-storyboard.mjs — novel-storyboard skill 的确定性工具（分镜）
+
+  seed <script.json> [--eps 1-3]              从剧本预填节拍工作底稿（打印到 stdout）
+  validate <sb.json> --script <script.json>   校验；有违规逐条打印并 exit 1
+           [--outline] [--cast] [--art]       outline/cast 查提示词人名；art 只管显示名字
+  checkup <sb.json> --script <script.json>    只打印质量门 ✓/✗，有未过项 exit 1
+  render <sb.json> --script <script.json>     渲染报告到 stdout（默认 --md）
+         [--html|--md] [--outline] [--art]    分镜图从 ./<段号>/f<切序>.png 找
+         [--per-ep] [--out 目录]              每集一份独立 HTML（--per-ep 时）
+  export <sb.json> --script <script.json>     导出 H3 投产包：每段一个文件夹 <段号>/prompt.md
+         [--out .]                            （分镜图 f1..fN.png 同住）+ 根部 manifest.json
+  slug <name>                                 剧名转安全文件名`;
+
+function readJson(path) {
+  return JSON.parse(readFileSync(resolve(path), 'utf8'));
 }
 
-// 把结构化 JSON 里分散的 Prompt 抽成"打开就能复制"的平铺文件。
-// 这是 Prompt Pipeline 的最后一公里：JSON 给 Agent、HTML 给人审、txt 给你直接粘进 ComfyUI/H3。
-function cmdExport(args) {
-  const { pos, opts } = parseArgs(args);
-  const p = pos[0];
-  if (!p) { console.error('用法: export <storyboard.json> [--cast <cast.json> --art <art.json>] [--out <dir>]'); process.exit(2); }
-  const doc = readDoc(p);
-  const ctx = resolveCtx(opts);
-  const base = opts.out ? resolve(opts.out) : resolve(process.cwd(), `${slugify(doc.source || 'storyboard')}-prompts`);
-  const dirs = {
-    characters: join(base, 'characters'),
-    scenes: join(base, 'scenes'),
-    props: join(base, 'props'),
-    shots: join(base, 'shots')
+function flag(rest, name, fallback = null) {
+  const i = rest.indexOf(name);
+  return i >= 0 && rest[i + 1] ? rest[i + 1] : fallback;
+}
+
+function loadCtx(rest) {
+  const get = (name) => {
+    const path = flag(rest, name);
+    return path ? readJson(path) : null;
   };
-  for (const d of Object.values(dirs)) mkdirSync(d, { recursive: true });
-
-  // ── 角色 Prompt（来自 cast.json）──
-  let charN = 0;
-  if (ctx.cast && Array.isArray(ctx.cast.characters)) {
-    for (const c of ctx.cast.characters) {
-      const id = c.id || slugify(c.name);
-      const img = c.image || {};
-      const identity = (c.identityAnchors && Array.isArray(c.identityAnchors) && c.identityAnchors.length)
-        ? c.identityAnchors.join('\n- ')
-        : (c.identity || '');
-      const wardrobe = (c.wardrobe && Array.isArray(c.wardrobe) && c.wardrobe.length)
-        ? c.wardrobe.map(w => `  ${w.id} — ${w.prompt}`).join('\n')
-        : '';
-      const body = [
-        `=== ${c.name} 角色生成 Prompt ===`,
-        img.prompt ? img.prompt : '（cast.json 未提供 image.prompt）',
-        '',
-        identity ? `=== 不可变特征 Identity Lock（注入每个 Prompt 防脸崩）===\n- ${identity}` : '',
-        wardrobe ? `=== 服装 Wardrobe ===\n${wardrobe}` : '',
-        img.portrait ? `\n=== 参考图 Reference ===\n${img.portrait}` : (img.sheet ? `\n=== 参考图（设定板，仅作风格参考）===\n${img.sheet}` : '\n=== 参考图 ===\n（未提供，需先生成角色图）')
-      ].filter(Boolean).join('\n');
-      writeFileSync(join(dirs.characters, `${id}-${slugify(c.name)}.txt`), body + '\n');
-      charN += 1;
-    }
-  }
-
-  // ── 场景 Prompt（来自 art.json）──
-  let sceneN = 0;
-  if (ctx.art && Array.isArray(ctx.art.scenes)) {
-    for (const s of ctx.art.scenes) {
-      const lightingLines = (Array.isArray(s.lighting) ? s.lighting : [])
-        .map(l => `  [${l.state}] ${l.prompt || ''}`).join('\n');
-      const empty = s.image && s.image.prompt ? s.image.prompt : '（art.json 未提供空景提示词）';
-      const body = [
-        `=== ${s.name || s.id} 空景 Prompt ===`,
-        empty,
-        '',
-        lightingLines ? `=== 光照状态 Lighting ===\n${lightingLines}` : '',
-        s.image && s.image.negativePrompt ? `=== 反向提示词 ===\n${s.image.negativePrompt}` : ''
-      ].filter(Boolean).join('\n');
-      writeFileSync(join(dirs.scenes, `${s.id}-${slugify(s.name || s.id)}.txt`), body + '\n');
-      sceneN += 1;
-    }
-  }
-
-  // ── 道具 Prompt（来自 art.json）──
-  let propN = 0;
-  if (ctx.art && Array.isArray(ctx.art.props)) {
-    for (const pr of ctx.art.props) {
-      const states = (Array.isArray(pr.states) ? pr.states : [])
-        .map(st => `  [${st.state}] ${st.prompt || ''}`).join('\n');
-      const body = [
-        `=== ${pr.name || pr.id} 道具 Prompt（白底无手）===`,
-        pr.image && pr.image.prompt ? pr.image.prompt : '（art.json 未提供道具图提示词）',
-        '',
-        states ? `=== 状态变体 States ===\n${states}` : ''
-      ].filter(Boolean).join('\n');
-      writeFileSync(join(dirs.props, `${pr.id}-${slugify(pr.name || pr.id)}.txt`), body + '\n');
-      propN += 1;
-    }
-  }
-
-  // ── 镜头 Prompt（来自 storyboard 每条 shot 的 copy block）──
-  let shotN = 0;
-  for (const ep of doc.episodes || []) {
-    for (const s of ep.shots || []) {
-      const sd = join(dirs.shots, s.shotId);
-      mkdirSync(sd, { recursive: true });
-      const refLines = (s.refImagePaths && s.refImagePaths.length) ? s.refImagePaths.join('\n') : '（无）';
-      const h3Mode = (s.h3 && s.h3.mode) || 'I2VA';
-      const dur = (s.durationSec != null) ? `${s.durationSec}s` : '（未定）';
-      // 每镜 FINAL 生成说明（参考图 / 建议时长 / 模式 / 导演概要），让 export 包"复制即用"
-      const metaLines = [
-        `=== ${s.shotId} 生成说明 (FINAL) ===`,
-        `景别: ${s.shotType || '（未定）'}`,
-        `建议时长: ${dur}`,
-        `视频模式: ${h3Mode}${h3Mode === 'I2VA' ? '（首帧图 + 角色参考图驱动）' : '（纯文本生视频）'}`,
-        `参考图: ${refLines}`,
-        s.direction ? `导演: ${s.direction.framing}, ${s.direction.cameraAngle}, ${s.direction.lens}, 焦点=${s.direction.visualFocus}, 情绪=${s.direction.emotion}, 色调=${s.direction.colorMood}` : '（无 direction，未 autofill）'
-      ].join('\n');
-      writeFileSync(join(sd, 'first-frame.txt'), `=== FINAL FIRST FRAME PROMPT（直接复制给 Krea2 文生图/图生图）===\n${s.firstFrameCopyBlock || s.splitPrompt || '（未 autofill，无首帧提示词）'}\n`);
-      writeFileSync(join(sd, 'negative.txt'), `${s.negativePrompt || '（无）'}\n`);
-      // h3.txt 直接写完整 h3CopyBlock（含首帧引用句 "For the target video... <Picture 1> is fully referenced"），
-      // 这是 I2VA 模式赖以定位首帧的关键信息；formatH3 仅 legacy 模式（无 h3CopyBlock）兜底。
-      writeFileSync(join(sd, 'h3.txt'), (s.h3CopyBlock || (s.h3 ? formatH3(s.h3) : '（legacy 模式无 H3 提示词）')) + '\n');
-      writeFileSync(join(sd, 'refs.txt'), `=== 本镜参考图 Reference（建议按景别取用）===\n${refLines}\n`);
-      writeFileSync(join(sd, 'meta.txt'), metaLines + '\n');
-      shotN += 1;
-    }
-  }
-
-  console.error(`✓ 已导出 Prompt 包：${base}`);
-  console.error(`  角色 ${charN} / 场景 ${sceneN} / 道具 ${propN} / 镜头 ${shotN}`);
-  console.error(`  工作流：打开 → 复制 → 生成（角色/场景/道具供抽卡，shots/E01S001 供首帧+H3）`);
-  return base;
+  return { script: get('--script'), outline: get('--outline'), cast: get('--cast'), art: get('--art') };
 }
 
-// 把 h3 对象格式化成可读文本块（与 h3CopyBlock 同源但独立于渲染器）
-function formatH3(h3) {
-  if (typeof h3 === 'string') return h3 + '\n';
-  const lines = [];
-  if (h3.mode) lines.push(`mode: ${h3.mode}`);
-  if (h3.integrated_multimodal_description) lines.push(`\n[integrated_multimodal_description]\n${h3.integrated_multimodal_description}`);
-  if (h3.overall_soundscape) lines.push(`\n[overall_soundscape]\n${h3.overall_soundscape}`);
-  if (h3.non_diegetic_music) lines.push(`\n[non_diegetic_music]\n${h3.non_diegetic_music}`);
-  return lines.join('\n') + '\n';
+function main(argv) {
+  const [cmd, ...rest] = argv;
+
+  if (!cmd || cmd === '-h' || cmd === '--help') {
+    console.log(USAGE);
+    process.exit(cmd ? 0 : 1);
+  }
+
+  if (cmd === 'seed') {
+    const [path] = rest;
+    if (!path) throw new Error('用法：seed <script.json> [--eps 1-3]');
+    const range = flag(rest, '--eps');
+    let epRange = null;
+    if (range) {
+      const m = String(range).match(/^(\d+)-(\d+)$/) ?? String(range).match(/^(\d+)$/);
+      if (!m) throw new Error('--eps 形如 3 或 1-6');
+      epRange = m[2] ? [Number(m[1]), Number(m[2])] : [Number(m[1]), Number(m[1])];
+    }
+    console.log(JSON.stringify(seedFromScript(readJson(path), epRange), null, 2));
+    return;
+  }
+
+  if (cmd === 'validate' || cmd === 'checkup') {
+    const [path] = rest;
+    if (!path) throw new Error(`用法：${cmd} <storyboard.json> --script <script.json> [--outline] [--cast]`);
+    const board = readJson(path);
+    const ctx = loadCtx(rest);
+    if (!ctx.script) throw new Error('分镜离开剧本没有意义——必须给 --script <script.json>');
+    if (!ctx.outline && !ctx.cast) console.error('⚠️ 没给 --outline / --cast，跳过提示词人名检查');
+
+    if (cmd === 'checkup') {
+      const gates = gateReport(board, ctx);
+      for (const g of gates) console.log(`${g.ok ? '✓' : '✗'} ${g.label}${!g.ok && g.detail ? ` — ${g.detail}` : ''}`);
+      const failedN = gates.filter((g) => !g.ok).length;
+      console.log(failedN ? `\n✗ ${failedN} 项未过` : '\n✓ 全部通过');
+      if (failedN) process.exit(1);
+      return;
+    }
+
+    const problems = validateStoryboard(board, ctx);
+    if (problems.length) {
+      console.error(`✗ ${problems.length} 处违规：\n`);
+      for (const x of problems) console.error('  ' + x);
+      process.exit(1);
+    }
+    const st = computeStats(board, ctx.script);
+    console.log(`✓ ${st.episodes.length} 集 / ${st.totals.segments} 段 / ${st.totals.cuts} 个分镜全部通过校验（共 ${st.totals.seconds}s / 目标 ${st.totals.targetSeconds}s / ${st.batches.length} 个生成批次）`);
+    return;
+  }
+
+  if (cmd === 'render') {
+    const [path] = rest;
+    if (!path) throw new Error('用法：render <storyboard.json> --script <script.json> [--html|--md] [--outline] [--art] [--per-ep] [--out 目录]');
+    const board = readJson(path);
+    const ctx = loadCtx(rest);
+    if (!ctx.script) throw new Error('分镜离开剧本没有意义——必须给 --script <script.json>');
+    ctx.imageExists = (rel) => existsSync(resolve(rel));
+
+    // --per-ep：每集一份独立 HTML（沿用上游段卡/节奏带版式），输出到 --out 目录。
+    // 复用 renderHtml 的完整产物做切片，避免逻辑分叉；仅把每集的 <section class="ep"> 单独成页。
+    if (rest.includes('--per-ep')) {
+      const full = renderHtml(board, ctx);
+      const head = (full.match(/<head>[\s\S]*?<\/head>/) || ['<head></head>'])[0];
+      const header = (full.match(/<header class="hd">[\s\S]*?<\/header>/) || [''])[0];
+      const kpis = (full.match(/<div class="kpis">[\s\S]*?<\/div>/) || [''])[0];
+      const gatesSec = (full.match(/<section class="top-sec" id="sec-gates">[\s\S]*?<\/section>/) || [''])[0];
+      const scripts = (full.match(/<script type="application\/json" id="storyboard-data">[\s\S]*?<\/script>\s*<script>[\s\S]*?<\/script>/) || [''])[0];
+      const epSecs = [...full.matchAll(/<section class="ep" id="ep-\d+">[\s\S]*?<\/section>/g)].map((m) => m[0]);
+      const outDir = resolve(flag(rest, '--out', '.'));
+      mkdirSync(outDir, { recursive: true });
+      const idxLinks = [];
+      epSecs.forEach((sec) => {
+        const epId = (sec.match(/id="ep-(\d+)"/) || [,'?'])[1];
+        const fn = `E${epId}.html`;
+        const page = `<!doctype html><html lang="zh">${head}<body><div class="page">${header}${kpis}${sec}${gatesSec}</div>${scripts}</body></html>`;
+        writeFileSync(resolve(outDir, fn), page);
+        idxLinks.push(`<li><a href="./${fn}">第 ${epId} 集</a></li>`);
+      });
+      const idx = `<!doctype html><html lang="zh">${head}<body><div class="page">
+<header class="hd"><h1>${esc(board.source)}</h1><span class="sub">按集分镜（共 ${epSecs.length} 集）</span></header>
+<div class="gates"><h2>各集入口</h2><ul>${idxLinks.join('')}</ul></div>
+</div></body></html>`;
+      writeFileSync(resolve(outDir, 'index.html'), idx);
+      console.log(`✓ 已按集生成 ${epSecs.length} 份 HTML 报告 → ${outDir}`);
+      return;
+    }
+
+    process.stdout.write((rest.includes('--html') ? renderHtml(board, ctx) : renderMarkdown(board, ctx)) + '\n');
+    return;
+  }
+
+  if (cmd === 'export') {
+    const [path] = rest;
+    if (!path) throw new Error('用法：export <storyboard.json> --script <script.json> [--out h3]');
+    const board = readJson(path);
+    const ctx = loadCtx(rest);
+    if (!ctx.script) throw new Error('分镜离开剧本没有意义——必须给 --script <script.json>');
+    const dir = flag(rest, '--out', '.');
+    const pack = exportPack(board, ctx.script, { imageExists: (rel) => existsSync(resolve(rel)), dir });
+    for (const f of pack.files) {
+      mkdirSync(resolve(f.path, '..'), { recursive: true });
+      writeFileSync(resolve(f.path), f.content, 'utf8');
+    }
+    const segN = pack.manifest.length;
+    console.log(`✓ ${segN} 段投产包 → ${resolve(dir)}/（每段一个文件夹：分镜图 + prompt.md；根部 manifest.json）`);
+    if (pack.missingTotal) console.log(`⚠️ 缺 ${pack.missingTotal} 张分镜图，已在 manifest 的 missing 里标注——喂 H3 前先补齐`);
+    return;
+  }
+
+  if (cmd === 'slug') {
+    if (!rest[0]) throw new Error('用法：slug <name>');
+    console.log(slug(rest[0]));
+    return;
+  }
+
+  throw new Error(`未知命令 ${cmd}\n\n${USAGE}`);
 }
 
-function main() {
-  const [, , cmd, ...rest] = process.argv;
-  if (!cmd) { console.error('novel-storyboard v' + SCRIPT_VERSION); console.error('命令: seed | validate | checkup | render | batches | export | split'); process.exit(2); }
-  switch (cmd) {
-    case 'seed': return cmdSeed(rest);
-    case 'validate': return cmdValidate(rest);
-    case 'checkup': return cmdCheckup(rest);
-    case 'render': return cmdRender(rest);
-    case 'batches': return cmdBatches(rest);
-    case 'export': return cmdExport(rest);
-    case 'split': return cmdSplit(rest);
-    default: console.error('未知命令: ' + cmd); process.exit(2);
+// 软链安装时 argv[1] 是链接路径，两边都取 realpath 才能比得上
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
   }
 }
 
-main();
+if (isMainModule()) {
+  // `render ... | head` 这类管道提前关闭时安静退出，别甩 EPIPE 堆栈
+  process.stdout.on('error', (e) => {
+    if (e.code === 'EPIPE') process.exit(0);
+    throw e;
+  });
+  try {
+    main(process.argv.slice(2));
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error);
+    process.exit(1);
+  }
+}

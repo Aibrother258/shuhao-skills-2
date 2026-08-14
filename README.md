@@ -9,7 +9,7 @@
 >
 > <img src="assets/wechat.png" alt="烁皓微信二维码" width="180">
 
-# shuohao-skills
+# shuohao-skills-2
 
 **AI 短剧制作的 skill 集合**：从一本小说到能开拍的制作素材——拆角色、排大纲、出场景与道具设定、写剧本、拆分镜，外加一个项目总控把五层串成一条可追踪的产线。给 AI 编码 agent 用，**Claude Code 和 codex 都能跑**。
 

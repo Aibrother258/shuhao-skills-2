@@ -3,7 +3,7 @@
 > These skills are free and open source, built and battle-tested on real AI short-drama production.
 > If they save you an afternoon, consider [**buying me a coffee on Ko-fi**](https://ko-fi.com/eternityspring) ☕ — it keeps the updates coming.
 
-# shuohao-skills
+# shuohao-skills-2
 
 **Agent skills for AI short-drama production** — from a novel to shoot-ready material: character bibles, adaptation outlines, scene & prop bibles, screenplays, shot-level storyboards, plus a project controller that strings the five layers into a trackable pipeline. Built for AI coding agents, **runs in both Claude Code and codex**.
 

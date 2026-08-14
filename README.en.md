@@ -43,8 +43,8 @@ workflow live in the [demo](skills/novel-storyboard/demo/README.md).
 ## Install
 
 ```bash
-git clone https://github.com/eternityspring/shuohao-skills.git
-cd shuohao-skills
+git clone https://github.com/Aibrother258/shuhao-skills-2.git
+cd shuhao-skills-2
 ./scripts/install.sh
 ```
 
@@ -108,7 +108,13 @@ frontmatter); `--run` also executes every self-test. Self-tests only:
 for f in skills/*/scripts/selftest.mjs; do node "$f"; done
 ```
 
-There is no CI — the self-tests run in about a second, so running them locally beats waiting on a pipeline. **Only tested on macOS with Node 24**; there is no platform-specific code, so Linux and older Node releases should be fine, but that is unverified.
+CI is configured: `.github/workflows/ci.yml` runs `check.mjs --run` plus the novel-project checks on **Node 18 / 20 / 22** on every push. Self-tests are also fast enough to run locally:
+
+```bash
+node scripts/check.mjs --run        # structure check + every skill's self-test
+```
+
+There is no platform-specific code, so it runs on macOS and Linux alike; verified on Node 18/20/22.
 
 
 ## License

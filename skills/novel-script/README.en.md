@@ -84,4 +84,4 @@ node scripts/selftest.mjs
 
 The bundled example (`examples/渡口-script.json`) is a **complete 6-episode script** — 9 scenes, 123 lines, every episode inside the ±15% band, all gates passing against the outline and art fixtures.
 
-**Only tested on macOS + Node 24.**
+**Verified on macOS + Node 18/20/22 (CI matrix).** No platform-specific code, so it also runs on Linux.

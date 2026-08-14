@@ -48,4 +48,4 @@ node scripts/selftest.mjs
 
 131 assertions — seeding, style presets, gate-defeating cases for all 11 gates, rendering, export. No model calls, runs in about a second.
 
-**Only tested on macOS + Node 24.**
+**Verified on macOS + Node 18/20/22 (CI matrix).** No platform-specific code, so it also runs on Linux.

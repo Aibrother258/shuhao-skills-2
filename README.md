@@ -48,8 +48,8 @@
 ## 安装
 
 ```bash
-git clone https://github.com/eternityspring/shuohao-skills.git
-cd shuohao-skills
+git clone https://github.com/Aibrother258/shuhao-skills-2.git
+cd shuhao-skills-2
 ./scripts/install.sh
 ```
 
@@ -111,7 +111,13 @@ node scripts/check.mjs --run
 for f in skills/*/scripts/selftest.mjs; do node "$f"; done
 ```
 
-没有配 CI——自测足够快（1 秒），本地跑一次比等 CI 更省事。**只在 macOS + Node 24 上验过**；代码没有平台相关调用，Linux 和更低版本 Node 理论上没问题，但没验。
+已配 CI：`.github/workflows/ci.yml` 在 **Node 18 / 20 / 22** 上跑 `check.mjs --run` + novel-project 校验，每次 push 自动执行。自测也足够快，本地跑同样方便：
+
+```bash
+node scripts/check.mjs --run        # 结构校验 + 全 skill 自测
+```
+
+代码没有平台相关调用，macOS / Linux 均可；已在 Node 18/20/22 上验证。
 
 
 ## License

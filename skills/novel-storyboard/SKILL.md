@@ -76,11 +76,11 @@ node scripts/novel-storyboard.mjs seed <script.json> \
 - `--prompt-format h3|legacy`（默认 `h3`）：`h3` 生成 H3 视频提示词；`legacy` 只生成首帧图像提示词（不含 `h3` 字段，质量门退化为 13+G17 道）。
 - `--h3-mode i2va|t2va`（默认 `i2va`）：`i2va`=首帧图+角色参考图驱动（图生视频，可反复抽卡，适合你的 ComfyUI 工作流）；`t2va`=纯文生视频。
 - 每条镜头额外生成两个**可直接复制粘贴**的整块：`firstFrameCopyBlock`（首帧出图，粘进 Krea2）与 `h3CopyBlock`（视频生成，粘进 H3），并列出 `refImagePaths`（人物角色图路径，供两链路复用）。
-- 不加 `--autofill`：提示词留空，由你（模型）逐镜精写。
+- 加 `--autofill`：提示词由脚本**确定性合成**，产出的 `firstFrameCopyBlock` / `h3CopyBlock` 已是**直接可复制的最终提示词**，无需模型二次加工即可拿去生图/生视频。
 
-### Step 3 · 补"设计字段"（模型职责）
-骨架里**只有提示词、预警和连续性状态需要你填**：
-- `prompt`：首帧画面英文描述（若未 autofill，需你写；autofill 后建议逐镜润色景别/构图/情绪）。
+### Step 3 · 可选微调（非必需）
+脚本 autofill 已给出可直接用的提示词；只有当默认推断的景别/构图/情绪不符合你的意图时，才手动覆盖：
+- `prompt`：首帧画面英文描述（autofill 已生成完整版，可直接复制；如需微调景别/构图/情绪可改，但非必经流程）。
 - `negativePrompt`：反向提示词（autofill 已给，可改）。
 - `shotType` / `camera`：按需覆盖默认。
 - `warnings`：多人近景/特写、含人群等大模型难 render 的镜头，标注难点。
@@ -121,7 +121,7 @@ node scripts/selftest.mjs
 - **一一对应**：1 beat = 1 shot，保证剧本零漏拍，也便于"剧本改一句→定位到哪一镜"。
 - **时长继承剧本**：shot 时长直接沿用 `novel-script` 已校验的 beat 时长模型，所以分镜单集总时长天然贴合剧本目标，不会出现"剧本 2 分钟、分镜 5 分钟"的脱节。
 - **批次归并**：同 `场景+光照` 的镜头归到一个生成批次，复用同一套场景资产，省 token 也保一致。
-- **提示词可自动合成**：`--autofill` 从 art/cast 抓场景光照与角色形象，拼出可用首帧提示词，降低"从零写提示词"门槛；模型再逐镜精修。
+- **提示词自动合成（复制即用）**：`--autofill` 从 art/cast 抓场景光照与角色形象，确定性拼出**可直接复制的最终首帧/H3 提示词**，无需模型二次加工；如需微调景别/构图可手动改，但非必经流程。
 - **H3 视频提示词一键到位**：`promptFormat=h3`（默认）时，每条镜头额外产出符合 `h3-prompt-writing` 规范的视频提示词——`[Shot N]` 镜头头 + 稳定 `(S1)` 说话人 ID + `<d>[Chinese]…</d>` 台词封装 + `off-screen voiceover` 闭唇规则 + 机位→H3 运镜词表 + 声景/配乐三段。默认 `h3Mode=i2va`：在开头插入首帧引用句并将角色图作为参考，直接对接你的"首帧图+角色图→H3 生视频" ComfyUI 抽卡链路。
 - **可直接复制粘贴**：每条镜头生成 `firstFrameCopyBlock`（首帧出图块，粘进 Krea2）与 `h3CopyBlock`（视频生成块，粘进 H3），并列出 `refImagePaths`（人物角色图），全程零手工拼装。
 

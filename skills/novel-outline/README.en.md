@@ -68,4 +68,4 @@ node scripts/selftest.mjs
 
 200 assertions — chunking, validation, gate-defeating cases, asset aggregation, rendering, export. No model calls, runs in about a second.
 
-**Only tested on macOS + Node 24.**
+**Verified on macOS + Node 18/20/22 (CI matrix).** No platform-specific code, so it also runs on Linux.

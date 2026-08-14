@@ -177,4 +177,4 @@ node scripts/selftest.mjs
 
 307 assertions across chunking, alias merging, assembly, localization, validation, and rendering. No model calls, no quota, runs in about a second. Run it before anything else after touching the scripts.
 
-**Only tested on macOS with Node 24.** There is no platform-specific code, so Linux and older Node releases should be fine, but that is **unverified**.
+**Verified on macOS + Node 18/20/22 (CI matrix).** No platform-specific code, so it also runs on Linux.

@@ -1,5 +1,14 @@
 # Changelog
 
+## 文档清理 + 定位校准（2026-08-14d，ChatGPT 第四次分析）
+
+ChatGPT 第四次把仓库定位收敛为 **Prompt Pipeline**（非生产 OS）。本轮修掉其点名的历史信息残留类 P0 文档 bug，并校准定位措辞，未动代码逻辑（守红线）：
+
+- **安装地址修复**：`README.md` / `README.en.md` 的 clone 地址从旧仓库 `eternityspring/shuohao-skills.git` 改为 `Aibrother258/shuhao-skills-2`
+- **CI / Node 描述修复**：主 README 原写"没配 CI / 只在 Node 24 验过"，改为如实描述 `.github/workflows/ci.yml`（Node 18/20/22 矩阵）+ 本地 `check.mjs --run`
+- **skill README 一致性**：`novel-characters/outline/art/script` 中英 README 的"Node 24 没验过"统一改为"已在 Node 18/20/22（CI 矩阵）验证"
+- **模型二次润色降级**：`novel-storyboard/SKILL.md` 把"模型逐镜精修"从正常必经流程改为"autofill 产出即最终可复制提示词，微调可选而非必需"，与零模型依赖红线对齐
+
 ## novel-storyboard — Prompt Pipeline 最后一公里（2026-08-14c）
 
 把"结构化 JSON"补成"你直接能复制去生的 Prompt 文件"，对齐最新 ChatGPT/DeepSeek 收敛后的定位（**Shuohao AI Drama Prompt Pipeline**，不是生产 OS）：

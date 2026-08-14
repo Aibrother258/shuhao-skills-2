@@ -45,6 +45,19 @@ export const SCENE_STYLE_PRESETS = {
       'people, human figures, characters, crowds, photorealistic, 3d render, hyperrealistic texture, harsh contrast, gritty grime, lens effects, text, watermark, signature',
     tags: ['ghibli-like', 'background art', 'watercolour', 'environment sheet', 'warm palette'],
   },
+
+  // 纯写实（照片级）环境：realistic 基础上去掉厚涂笔触，追求照片质感。
+  photorealistic: {
+    label: '写实',
+    render:
+      'Photorealistic environment photography, shot on a wide-angle lens with real depth of field, true-to-life materials and lighting, grounded architectural perspective, cinematic depth, no illustration or painting style',
+    surface:
+      'Weathered, lived-in materials: chipped paint, water stains, patina on metal, worn wood grain, dust in corners and light shafts; fabric and paper props show creases and age; nothing looks factory-new. Atmospheric depth with haze or volumetric light where the space allows',
+    // 这里绝不能禁 photorealistic（本身就是写实）；只禁「假」与绘画感、以及人物
+    negative:
+      'people, human figures, characters, crowds, silhouettes of people, illustration, painting, semi-realistic, cel shading, anime, plastic CG look, oversaturated colours, sterile showroom cleanliness, warped perspective, melted geometry, floating objects, text, watermark, signature',
+    tags: ['photorealistic', 'environment photography', 'weathered materials', 'cinematic', 'real depth of field'],
+  },
 };
 
 export const SUPPORTED_STYLES = Object.keys(SCENE_STYLE_PRESETS);

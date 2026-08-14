@@ -66,7 +66,27 @@ metadata:
 2. 小说原文——自己归纳场景清单（主舞台优先，参考 novel-outline 的主场景上限思路：别贪多）
 3. 用户手写的场景清单
 
-画风：**默认 `realistic`**（半写实厚涂），动画质感用 `ghibli`。**跟角色 skill 保持同一档**——角色是吉卜力、场景是半写实，合成的时候没法看。跑 `node {baseDir}/scripts/novel-art.mjs styles` 看预设全文，整块取用不混搭。
+#### ⚠️ 风格必须先选（全流程第一步）（硬卡点 C2）
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C2 风格决策** +
+> **开工前对齐①**：这是整套管线的第一道风格决策点，开工第一步就要和用户确认，定下后
+> 全链路沿用、中途不能换。
+
+美术风格在 `novel-art` 这一步就要定下来，**这是整个管线的第一道风格决策点**，定下后 `novel-characters` → `novel-art` → `novel-storyboard` 全部沿用同一档，中途不能换。
+
+常见可选风格（`STYLE_PRESETS` 的 `id`，整块预设见 `novel-characters/references/style-presets.md`）：
+
+| id | 说明 | 典型用途 |
+| --- | --- | --- |
+| `realistic` | 半写实厚涂（**默认**） | 真人感短剧、纪实、情感向 |
+| `ghibli` | 吉卜力式手绘赛璐璐动画 | 治愈、童话、低龄向 |
+| `photorealistic` | 纯写实（照片级） | 真人感、写实短剧、纪录片质感 |
+| `comic` | 美式漫画 / 粗线赛璐璐 | 爽文、热血、条漫改 |
+| `ink` | 水墨 / 国风写意 | 古风、武侠、文艺向 |
+| `noir` | 暗调胶片 / 高反差 | 悬疑、犯罪、黑色电影感 |
+
+> 注：当前内置预设为 `realistic`、`ghibli`、`photorealistic`；`comic`/`ink`/`noir` 为扩展方向，使用前需在 `STYLE_PRESETS` 补齐对应五块（`render/surface/lighting/negative/tags`），否则 `validate` 会因风格与反向词不匹配报错。
+
+**跟角色 skill 保持同一档**——角色是吉卜力、场景是半写实，合成的时候没法看。跑 `node {baseDir}/scripts/novel-art.mjs styles` 看预设全文，整块取用不混搭。**换风格必须重跑上游全链路**（art → characters → script → storyboard），单改一处会让三套质感对不上。
 
 有 cast.json（novel-characters 的产出）也带上——校验「提示词不含角色名」要用。
 
@@ -103,7 +123,10 @@ node {baseDir}/scripts/novel-art.mjs validate <art.json> --cast <cast.json>
 
 **有违规逐条修，改完重跑，直到通过。**
 
-### Step 4 — 出图（可选）
+### Step 4 — 出图（可选）（硬卡点 C4）
+
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C4 美术 / 道具出图**：
+> 是否在此出场景 / 道具设定图需按环境确认（无 codex 则跳过、只交提示词），**不替用户默认生图**。
 
 场景和道具各一张 16:9 设定图，版面都是**主视角大图 + 底部和右侧的 L 形细节边框**。场景：标准取景 + 第一个光照状态，细节格是锚点特写。道具：白底三四分之一主视角（主状态），细节格是锚点特写 + 其他状态 + 侧面。读 `{baseDir}/references/sheet.md` 照调用契约做，要点：
 
@@ -134,6 +157,8 @@ node {baseDir}/scripts/novel-art.mjs render <剧名>-art.json --html > art-repor
 └── images/
     └── <slug>-sheet.png           ← 有 codex 才有
 ```
+
+> 实际项目里本目录对应 `03_art/`，完整目录结构见 `novel-project/references/project-layout.md`。
 
 ---
 

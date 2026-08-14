@@ -58,7 +58,11 @@ metadata:
 
 ---
 
-### Step 0 — 定输入与范围
+### Step 0 — 定输入与范围（硬卡点 C5 · 范围与批量拍板）
+
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C5 剧本批量拍板** +
+> **开工前对齐②③**：启动第一步先确认本次范围（跑哪几集、是否带 `--outline/--art` 对账）与
+> 产出形态（只交提示词与路径、不替出图）。剧本是全管线改得最凶的一层，小批量出、快拍板。
 
 **outline.json 是剧本的直接上游**（分集梗概、爽点落点、单集时长都在里面），标准流程从它开始。没有的话先问用户是否跑 `novel-outline`；用户坚持直接写，就问清集数与单集分钟数，手建骨架，对账门会明说跳过。
 
@@ -123,6 +127,8 @@ node {baseDir}/scripts/novel-script.mjs render <剧名>-script.json --html \
 ├── <剧名>-script.md
 └── script-report.html             ← 双击就能开
 ```
+
+> 实际项目里本目录对应 `04_script/`，完整目录结构见 `novel-project/references/project-layout.md`。
 
 ---
 

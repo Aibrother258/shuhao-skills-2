@@ -21,7 +21,7 @@ const DEFAULT_PARAMS = {
   shotSecondsFloor: 1.5, // 单镜最短秒数
   shotSecondsCap: 10,    // 单镜最长秒数
   splitSecondsFloor: 1.0, // split 子镜下限（更低，允许把短动作拍拆开；G4 对 split 镜用此值）
-  style: 'semi-realistic', // 美术风格（与 art.json 对齐）
+  style: 'realistic', // 美术风格（默认 realistic=半写实厚涂；与 art.json 对齐，seed 时若传 --art 则以 art.json.style 为准）
   // ── H3 (MiniMax H3) 视频提示词相关 ──
   promptFormat: 'h3',    // 'h3' = 生成 H3 结构化视频提示词；'legacy' = 仅首帧图生提示词
   h3Mode: 'i2va',        // 'i2va' = 首帧图+角色参考图驱动(图生视频，可抽卡)；'t2va' = 纯文生视频
@@ -1072,6 +1072,8 @@ function renderHtml(doc, ctx) {
   const passClass = gr.failed.length ? 'fail' : 'pass';
   const passText = gr.failed.length ? `未通过 ${gr.failed.length} 道` : '全部通过';
 
+  const jsonPayload = JSON.stringify(doc, null, 2);
+
   return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 分镜</title><style>
 *{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#0f1115;color:#e6e6e6;padding:24px}
 h1{font-size:22px;margin-bottom:6px}.meta{color:#8b93a1;font-size:13px;margin-bottom:18px}
@@ -1095,7 +1097,35 @@ th{background:#1a1d24;color:#aab2c0}
 .shot-copy>summary{cursor:pointer;color:#7aa2ff;font-size:13px;font-weight:600}
 .cb{margin:8px 0}.cbl{color:#8b93a1;font-size:11.5px;margin-bottom:4px}
 .cb pre{background:#0f1115;border:1px solid #2a2f3a;border-radius:6px;padding:10px;font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#cdd6e6;max-height:320px;overflow:auto}
+.layers{background:#14181f;border:1px solid #2a2f3a;border-radius:10px;padding:12px 16px;margin-bottom:18px;font-size:12.5px}
+.layers b{color:#7aa2ff}.layers .note{color:#8b93a1;margin-top:6px}
+.data{border:1px solid #2a2f3a;border-radius:10px;margin-bottom:18px;overflow:hidden}
+.data summary{cursor:pointer;background:#1a1d24;padding:12px 16px;font-weight:700;font-size:13px;color:#7aa2ff}
+.data .bar{padding:8px 16px;display:flex;gap:10px;flex-wrap:wrap;border-bottom:1px solid #2a2f3a}
+.data .bar button{background:#2a2f3a;color:#e6e6e6;border:0;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer}
+.data pre{margin:0;padding:14px 16px;background:#0f1115;color:#cdd6e6;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto}
 </style></head><body>
+<div class="layers">
+  <b>三层交付物（用途务必分清）</b><br>
+  · <b>JSON</b>（Agent 用）：机器可读的分镜生产单，结构化、可程序化驱动下游。下方「JSON 源码」即同份数据。<br>
+  · <b>HTML</b>（人审用）：本页——给人看 KPI / 质量门 / 批次 / 逐镜表，并内嵌 JSON 与可复制提示词，方便审阅与人工决策。<br>
+  · <b>Prompt</b>（生产用）：export 命令产出的平铺 txt 包，直接粘进 Krea2 / MiniMax H3 / ComfyUI 生图生视频。
+  <div class="note">角色图不在本流程内生成。把上方「JSON 源码」里 refImagePaths 指向的路径（如 assets/cast/林默-model-sheet.png）放入你在别处生成的定稿图，再回填路径即可。</div>
+</div>
+<details class="data"><summary>📦 JSON 源码（Agent 用 · 点击展开）</summary>
+<div class="bar"><button id="copyJson">复制 JSON</button><button id="dlJson">下载 storyboard.json</button><span class="info" id="jsonSize"></span></div>
+<pre id="jsonView"></pre></details>
+<script>
+  const SB_DATA = ${jsonPayload};
+  (function(){
+    const v=document.getElementById('jsonView');
+    const txt=JSON.stringify(SB_DATA,null,2);
+    v.textContent=txt;
+    document.getElementById('jsonSize').textContent='('+ (txt.length/1024).toFixed(0) +' KB, '+ (SB_DATA.episodes?SB_DATA.episodes.reduce((n,e)=>n+(e.shots?e.shots.length:0),0):0) +' 镜)';
+    document.getElementById('copyJson').onclick=async()=>{try{await navigator.clipboard.writeText(txt);}catch(e){const t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();}const b=document.getElementById('copyJson');b.textContent='已复制';setTimeout(()=>b.textContent='复制 JSON',1200);};
+    document.getElementById('dlJson').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));a.download='storyboard.json';a.click();URL.revokeObjectURL(a.href);};
+  })();
+</script>
 <h1>${esc(doc.source || '未命名')} · 分镜表</h1>
 <div class="meta">novel-storyboard ${SCRIPT_VERSION} ｜ 风格 ${esc(p.style)} ｜ 提示格式 ${esc(p.promptFormat)} ｜ 语速 ${p.charsPerSecond} 字/秒 ｜ 动作 ${p.actionSeconds}s ｜ 容差 ±${Math.round(p.tolerance * 100)}%</div>
 <div class="kpis">
@@ -1148,6 +1178,10 @@ function cmdSeed(args) {
   const params = paramsOf(script);
   if (opts['prompt-format']) params.promptFormat = opts['prompt-format']; // 'h3' | 'legacy'
   if (opts['h3-mode']) params.h3Mode = opts['h3-mode']; // 'i2va' | 't2va'
+  // 风格单一来源：传 --art 时以 art.json.style 为准，保证分镜与美术/角色同档
+  if (opts.art && existsSync(resolve(opts.art))) {
+    try { const art = getJSON(resolve(opts.art)); if (art && art.style) params.style = art.style; } catch (_) {}
+  }
   let episodes = deriveShotsFromScript(script, { ctx, autofill: !!opts.autofill, params });
 
   // --eps 范围裁剪（支持 "3" 单集 或 "1-3" 区间）
@@ -1210,7 +1244,7 @@ function cmdCheckup(args) {
 function cmdRender(args) {
   const { pos, opts } = parseArgs(args);
   const p = pos[0];
-  if (!p) { console.error('用法: render <storyboard.json> [--md|--html] [--script --outline --art --cast]'); process.exit(2); }
+  if (!p) { console.error('用法: render <storyboard.json> [--md|--html] [--script --outline --art --cast] [--all] [--out 路径]'); process.exit(2); }
   const doc = readDoc(p);
   const ctx = resolveCtx(opts);
   const md = opts.html ? null : true;
@@ -1223,6 +1257,15 @@ function cmdRender(args) {
     const out = renderMarkdown(doc, ctx);
     if (opts.out) writeFileSync(resolve(opts.out), out);
     else process.stdout.write(out + '\n');
+  }
+  // --all：与 HTML 同目录一次性产出 Prompt 平铺包（生产用）。
+  // JSON 即输入文件本身（Agent 用），无需再写；此处只补 prompts。
+  if (opts.all) {
+    const outBase = opts.out
+      ? join(dirname(resolve(opts.out)), 'prompts')   // 与 HTML 同目录下的 prompts/
+      : resolve(process.cwd(), 'prompts');
+    cmdExport([p, '--cast', opts.cast || '', '--art', opts.art || '', '--out', outBase].filter(Boolean));
+    console.error(`✓ 三件套已就位：\n  · JSON  (Agent 用) : ${resolve(p)}\n  · HTML  (人审用)   : ${opts.out ? resolve(opts.out) : '(stdout)'}\n  · Prompts(生产用)  : ${outBase}`);
   }
 }
 

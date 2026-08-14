@@ -57,7 +57,31 @@ metadata:
 ## 工作流（7 步）
 
 ### Step 0 · 收参数
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **开工前对齐②③**：
+> 启动第一步先确认本次范围（剧本路径、是否带 `--art/--cast/--outline` 对账）与
+> 产出形态（只交提示词与路径、不替出图）。
+
 确认：① 剧本路径（`script.json`）；② 是否带 `--art/--cast/--outline` 做对账与 autofill。
+
+#### ⚠️ 风格选择（必须先定，全程统一）（硬卡点 C2 · 仅继承）
+> 见总表 **C2 风格决策**：分镜**不重选**风格，只继承上游。若从本 skill 启动，先确认
+> art.json.style 已定且沿用，不要临时另选一档。
+
+分镜的美术风格**不是本 skill 自己选的**，而是从上游 `art.json` 继承（`seed --art` 时自动读取 `art.json.style`）。因此：
+
+- **跑流程第一步就要先选风格**，在 `novel-art`（Step 0）定下，之后 `novel-characters` → `novel-art` → `novel-storyboard` 全部沿用同一档，中途不能换。
+- 改风格 = 上游重跑：换风格必须重跑 `novel-art` → `novel-characters` → `novel-storyboard` 全链路，单改一处风格会让角色/场景/分镜三套质感对不上（合成时没法看）。
+- 常见可选风格（`STYLE_PRESETS` 里的 `id`，整套预设见 `novel-characters/references/style-presets.md`）：
+  | id | 说明 | 典型用途 |
+  | --- | --- | --- |
+  | `realistic` | 半写实厚涂（默认） | 真人感短剧、纪实、情感向 |
+  | `ghibli` | 吉卜力式手绘赛璐璐动画 | 治愈、童话、低龄向 |
+  | `photorealistic` | 纯写实（照片级） | 真人感、写实短剧、纪录片质感 |
+  | `comic` | 美式漫画 / 粗线赛璐璐 | 爽文、热血、条漫改 |
+  | `ink` | 水墨 / 国风写意的 | 古风、武侠、文艺向 |
+  | `noir` | 暗调胶片 / 高反差 | 悬疑、犯罪、黑色电影感 |
+  > 注：当前内置预设为 `realistic`、`ghibli`、`photorealistic`；`comic`/`ink`/`noir` 为扩展方向，使用前需在 `STYLE_PRESETS` 补齐对应五块预设（`render/surface/lighting/negative/tags`），否则 `validate` 会因风格与反向词不匹配报错。
+- 若 `seed` 未传 `--art`，本 skill 回落到默认 `realistic`，但**强烈建议始终传 `--art`** 以保证风格与上游一致。
 
 ### Step 1 · 定位输入
 拿到 `script.json`。若上游没跑，先提示用户跑 `novel-script`。
@@ -101,15 +125,37 @@ node scripts/novel-storyboard.mjs validate <书名>-storyboard.json \
 - **首帧出图复制块 & H3 复制块已生成**（G16/G17）：保证每条镜头都有可直接粘进 ComfyUI 的文本，无需手工抄写。
 - **难点镜头须预警**：3 人近景/特写、含人群词必须进 `warnings`。
 
-### Step 5 · 渲染报告
-```bash
-node scripts/novel-storyboard.mjs render <书名>-storyboard.json --md  > <书名>-storyboard.md
-node scripts/novel-storyboard.mjs render <书名>-storyboard.json --html > <书名>-storyboard-report.html
-```
-HTML 报告含 KPI 带、质量门明细、生成批次单、逐集镜头表。
+### Step 5 · 渲染报告（三件套一次出齐）（硬卡点 C6 · 三层交付）
 
-### Step 6 · 交付
-把 `storyboard.json` + 报告交给下游"出图/出视频"工具（如 codex `$imagegen` 或 T2V/I2V），按 `batch` 批次批量生成首帧，再补镜头运动与配音。
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C6 分镜三层交付** +
+> **三层交付物**：这一步产出的 JSON / HTML / prompts 层级必须分清（JSON=Agent、HTML=人审、
+> Prompt=生产），且**不替用户生图**——只给提示词与回填路径。
+```bash
+# 一条命令同时产出 JSON（Agent 用）+ HTML（人审用）+ prompts/（生产用）
+node scripts/novel-storyboard.mjs render <书名>-storyboard.json --html --all \
+  --cast <书名>-cast.json --art <书名>-art.json --out <书名>-storyboard-report.html
+```
+- `--html`：生成 HTML 报告，并在页内**内嵌完整 JSON 源码**（可展开、复制、下载）+ 每条镜头可复制提示词块。
+- `--all`：与 HTML 同目录额外生成 `prompts/` 平铺包（characters/scenes/props/shots 四类 txt，打开即复制）。
+- 也可分开跑：`--md` 出 Markdown；`export` 单独出 prompts 包。
+
+> ⚠️ **本 skill 只产出"提示词与路径"，不调用任何生图/生视频工具**。角色图、首帧图、视频一律由你在别处生成后回填。具体见 Step 6。
+
+### Step 6 · 三层交付物（用途必须分清）
+| 层 | 产物 | 给谁 | 干什么 |
+| --- | --- | --- | --- |
+| **JSON** | `storyboard.json`（即输入文件本身） | **Agent** | 机器可读的分镜生产单，结构化、可程序化驱动下游 |
+| **HTML** | `<书名>-storyboard-report.html` | **人** | 审 KPI / 质量门 / 批次 / 逐镜表，页内嵌 JSON 与提示词，人工决策 |
+| **Prompt** | `prompts/` 平铺 txt 包 | **生产** | 直接粘进 Krea2 / MiniMax H3 / ComfyUI 生图生视频 |
+
+**角色图回填约定（不在流程内生成）**：
+1. `prompts/characters/*.txt` 是角色生成提示词，你拿去别处出角色图。
+2. 定稿后把图放到 `storyboard.json` 里 `refImagePaths` 指向的路径（实际项目为 `../02_cast/images/林默-model-sheet.png`，即 `02_cast/images/` 下）。
+3. 改 `refImagePaths` 即完成回填——分镜首帧/H3 提示词会自动引用该路径（见 `backfill` 类脚本或手工改 JSON）。
+4. 再跑 `render --all` 刷新 HTML / prompts 即可。
+
+> 实际项目里本 skill 对应 `05_storyboard/`，提示词包对应 `06_prompts/`，完整目录结构与跨阶段
+> 引用约定见 `novel-project/references/project-layout.md`。
 
 ### Step 7 · 自测（改了脚本才需要）
 ```bash

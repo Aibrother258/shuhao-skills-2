@@ -68,7 +68,25 @@ metadata:
 
 ### Step 0.5 — 确定画风
 
-用户可以指定出图风格：**默认 `realistic`**（半写实厚涂），想要动画质感就用 `ghibli`（吉卜力式手绘赛璐璐）。
+#### ⚠️ 风格必须先选（且跟 art 同一档）（硬卡点 C2）
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C2 风格决策** +
+> **开工前对齐①**：风格是整套管线的第一道决策，若从本 skill 启动需先确认上游 art.json.style
+> 已定且沿用，不要临时另选。
+
+出图风格在角色这步就要跟 `novel-art` 对齐——**整套管线第一道风格决策在 novel-art，这里只是沿用**。用户可以指定，但必须跟美术场景同一档，否则合成时人物与场景质感对不上。
+
+常见可选风格（`STYLE_PRESETS` 的 `id`）：
+
+| id | 说明 | 典型用途 |
+| --- | --- | --- |
+| `realistic` | 半写实厚涂（**默认**） | 真人感短剧、纪实、情感向 |
+| `ghibli` | 吉卜力式手绘赛璐璐动画 | 治愈、童话、低龄向 |
+| `photorealistic` | 纯写实（照片级） | 真人感、写实短剧、纪录片质感 |
+| `comic` | 美式漫画 / 粗线赛璐璐 | 爽文、热血、条漫改 |
+| `ink` | 水墨 / 国风写意 | 古风、武侠、文艺向 |
+| `noir` | 暗调胶片 / 高反差 | 悬疑、犯罪、黑色电影感 |
+
+> 注：当前内置预设为 `realistic`、`ghibli`、`photorealistic`；`comic`/`ink`/`noir` 为扩展方向，使用前需在 `STYLE_PRESETS` 补齐对应五块（`render/surface/lighting/negative/tags`），否则 `validate` 会因风格与反向词不匹配报错。
 
 ```bash
 node {baseDir}/scripts/novel-characters.mjs styles   # 打印预设的完整内容
@@ -76,7 +94,7 @@ node {baseDir}/scripts/novel-characters.mjs styles   # 打印预设的完整内�
 
 读 `{baseDir}/references/style-presets.md`。**换风格是整套换**——每个预设自带 render / surface / lighting / negative / tags 五块，整块取用，不要混搭。
 
-最容易搞反的是反向提示词：`realistic` 绝不能禁 `photorealistic`，`ghibli` 必须禁。`validate` 会拦这个。
+最容易搞反的是反向提示词：`realistic` 绝不能禁 `photorealistic`，`ghibli` 必须禁。`validate` 会拦这个。**改风格需重跑上游全链路**（art → characters → script → storyboard），单改角色会让人物与场景/分镜不一致。
 
 版面规则（16:9 三区、比例、细节让位）**不随风格变**，变的只有渲染质感。
 
@@ -172,9 +190,15 @@ node {baseDir}/scripts/novel-characters.mjs validate <cast.json> <book.txt>
 
 **有违规就按报错逐条修，改完重跑，直到通过。** 这四类错模型真的会犯——这套检查就是被真实输出打出来的。
 
-### Step 8 — 出图（可选，每个角色都出）
+### Step 8 — 出图（可选 · 默认只给提示词，由你在外处生成）（硬卡点 C3）
 
-**每个角色一张**，用 `image.sheet`，落到 `./images/<slug>-sheet.png`。一张横构图内部左右分栏：
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C3 角色出图 / 回填**：
+> 这是流程中必须和用户确认的环节——是否在此出图、还是只交提示词由用户去别处生成后回填，
+> **绝不能替用户默认生图**。
+
+> ⚠️ **本 skill 不强制出图**。标准交付是 `image.sheet` / `image.prompt` 提示词，你拿去别处（Krea2 / codex `$imagegen` / 其他生图工具）出角色图，生成后把定稿路径回填到 cast.json 的 `image.portrait`（或 `image.sheet` 引用路径）即可。只有当当前环境确有 codex 时，才走下方自动出图分支。
+
+**每个角色一张**（若你选择在此出图），用 `image.sheet`，落到 `./images/<slug>-sheet.png`。一张横构图内部左右分栏：
 
 ```
 ┌──────────┬────────────────────────────┐
@@ -229,10 +253,12 @@ report.html 的样式约定见 `{baseDir}/references/report-style.md`——要�
 ├── <书名>-cast.md
 ├── report.html                    ← 双击就能开
 └── images/
-    └── <slug>-sheet.png           ← 有 codex 才有
-└── assets/cast/
-    └── <角色名>-portrait.png      ← 干净单视角参考图，推荐（有 codex 才有）
+    ├── <slug>-model-sheet.png     ← 定稿角色图（有 codex 才有）
+    └── candidates/               ← 候选图，供挑选定稿
 ```
+
+> 实际项目里本目录对应 `02_cast/`，角色图引用路径写 `images/<角色>-model-sheet.png`，
+> 跨阶段引用约定见 `novel-project/references/project-layout.md`。
 
 ### Step 10 — 汇报
 

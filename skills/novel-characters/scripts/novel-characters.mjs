@@ -246,6 +246,23 @@ export const STYLE_PRESETS = {
       'photorealistic, 3d render, hyperrealistic skin texture, visible pores, subsurface scattering, harsh contrast, heavy painterly rendering, muddy or desaturated colours, gritty texture overlay, extra fingers, malformed hands, text, watermark, signature, busy or patterned background',
     tags: ['ghibli-like', 'cel shading', 'hand-painted', 'character sheet', 'flat daylight'],
   },
+
+  // 纯写实（照片级）：realistic 的基础上去掉厚涂笔触、追求照片质感。
+  // 与 realistic 一样绝不能禁 photorealistic；反向词只禁「假」与「绘画感」。
+  photorealistic: {
+    label: { zh: '写实', en: 'Photorealistic', ja: '写実' },
+    render:
+      'Photorealistic character photography, shot on a 50mm lens with shallow depth of field, true-to-life skin and fabric, anatomically grounded, no visible illustration or painting style',
+    surface:
+      'Real skin with visible pores, fine vellus hairs, uneven tone, faint capillaries at the nostrils and ear rims, natural subsurface scattering; eyes with a wet specular highlight, moist lower lid, visible iris fibres and a limbal ring; eyelids and eyebrows slightly asymmetric — no two sides identical; individual flyaway hair strands breaking the silhouette. Fabric with a visible weave, natural wear and shine at elbows, cuffs and knees, cloth falling with real weight and self-shadowing in the folds',
+    // 设定表要平光才好抠图，写实要方向光才有体积——分区解决
+    lighting:
+      'LIGHTING IN THE LEFT ZONE ONLY: a soft directional key light from the upper left with gentle falloff, subtle ambient occlusion under the chin, in the eye sockets and where the collar meets the neck, giving the head real volume. LIGHTING IN THE RIGHT ZONES: flat even orthographic lighting with no directional key and no cast shadows, so the figures stay measurable and cleanly cut out',
+    // 注意：这里绝不能禁 photorealistic（本身就是写实）；只禁「假」与绘画感
+    negative:
+      'illustration, painting, semi-realistic, painterly brush texture, cel shading, anime, plastic or waxy skin, over-smoothed airbrushed complexion, poreless doll face, perfectly symmetrical face, dead flat eyes without specular highlight, helmet-like hair with no loose strands, flat untextured fabric with no weave or wear, stiff mannequin posing, extra fingers, malformed hands, text, watermark, signature, busy or patterned background, harsh cast shadows on the backdrop',
+    tags: ['photorealistic', 'character photography', 'subsurface skin', '50mm lens', 'directional key light'],
+  },
 };
 
 export const SUPPORTED_STYLES = Object.keys(STYLE_PRESETS);

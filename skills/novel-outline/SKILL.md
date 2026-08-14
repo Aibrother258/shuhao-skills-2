@@ -44,6 +44,10 @@ metadata:
 
 ### Step 0 — 收参数 ⛔ 缺了不开工
 
+**先对齐全局三件事**（美术风格 / 本次范围 / 产出形态），完整约定见
+`novel-project/references/interaction-checkpoints.md`。本 skill 进入前风格（C2）通常已由
+`novel-art` 定下、范围（②）已明确——确认沿用即可，不重复盘问。
+
 一次问完，别轮流盘问。两件必问 + 两件给默认值待确认：
 
 | 参数 | 处理 |
@@ -86,7 +90,10 @@ node {baseDir}/scripts/novel-outline.mjs chunk <book.txt> <workdir>
 
 每卷一个子代理（支持并发就**同一条消息里全部发出**）：读 `{baseDir}/references/volume-pass.md`，读 `<workdir>/vol-NN.txt`，把卷摘要写到 `<workdir>/summary-NN.json`，只回一句「done NN」。
 
-### Step 3 — 快版骨架 → 用户拍板 ⛔
+### Step 3 — 快版骨架 → 用户拍板 ⛔（硬卡点 C1）
+
+> 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C1 大纲拍板**：
+> 这是流程中必须停下来的硬卡点，不能替用户决定方向。
 
 读 `{baseDir}/references/outline-pass.md` 和 `{baseDir}/references/schema.md`，照着做。产出骨架四块（adaptation / characters / scenes / beats），写成 `<workdir>/outline.json`。
 
@@ -136,6 +143,8 @@ report 里自带：KPI 带、关键决策（拍板三件事，大爆点列表和
 ├── <书名>-outline.md
 └── outline-report.html            ← 双击就能开
 ```
+
+> 实际项目里本目录对应 `01_outline/`，完整目录结构见 `novel-project/references/project-layout.md`。
 
 ---
 

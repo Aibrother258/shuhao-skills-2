@@ -24,6 +24,7 @@ export const DEFAULT_PARAMS = {
   actionSeconds: 2.5,  // 每个动作节拍的估时
   tolerance: 0.15,     // 时长容差 ±15%
   maxLineChars: 35,    // 单句台词上限——一口气说不完的台词也生成不了
+  hookWindow: 3,       // 开场钩子必须在全集前几拍内兑现——短剧开场 3 秒定生死
 };
 
 export function paramsOf(doc) {
@@ -127,7 +128,7 @@ export function gateReport(doc, ctx = {}) {
   const eps = Array.isArray(doc?.episodes) ? doc.episodes : [];
   const params = paramsOf(doc);
   const stats = computeStats(doc);
-  const bad = { duration: [], lineLen: [], speaker: [], hook: [], noAction: [], prose: [], beats: [], chars: [], scenes: [] };
+  const bad = { duration: [], lineLen: [], speaker: [], hook: [], hookOpen: [], noAction: [], prose: [], beats: [], chars: [], scenes: [] };
 
   for (const [i, ep] of eps.entries()) {
     const st = stats.episodes[i];
@@ -143,6 +144,26 @@ export function gateReport(doc, ctx = {}) {
 
     // 开场钩子与结尾悬念：说明必须落在纸面
     if (!thText(ep?.hook) || !thText(ep?.cliff)) bad.hook.push(label);
+
+    // 钩子不是标签是第一拍：hookBeat 认领具象落在哪一拍，必须在全集前几拍内。
+    // 只有说明没有认领，就会出现「钩子说皮箱、开场拍了八拍雾」的衔接断裂
+    {
+      const hb = ep?.hookBeat;
+      if (!Array.isArray(hb) || hb.length !== 2 || !Number.isInteger(hb[0]) || !Number.isInteger(hb[1])) {
+        bad.hookOpen.push(`${label}缺 hookBeat（[场, 拍]，认领钩子具象的位置）`);
+      } else {
+        const scene = ep?.scenes?.[hb[0] - 1];
+        if (!scene || hb[1] < 1 || hb[1] > (scene.flow ?? []).length) {
+          bad.hookOpen.push(`${label}的 hookBeat [${hb[0]}, ${hb[1]}] 指向不存在的节拍`);
+        } else {
+          let pos = hb[1];
+          for (let i = 0; i < hb[0] - 1; i++) pos += (ep.scenes[i]?.flow ?? []).length;
+          if (pos > params.hookWindow) {
+            bad.hookOpen.push(`${label}的钩子落在全集第 ${pos} 拍，超出前 ${params.hookWindow} 拍——冷开场先给钩子的具象`);
+          }
+        }
+      }
+    }
 
     for (const sc of ep?.scenes ?? []) {
       const cast = new Set(sc?.characters ?? []);
@@ -210,6 +231,7 @@ export function gateReport(doc, ctx = {}) {
   add('line-length', `单句台词 ≤ ${params.maxLineChars} 字`, bad.lineLen.length === 0, bad.lineLen.join('；'));
   add('speaker', '说话人在本场人物里，或明确标画外音 VO', bad.speaker.length === 0, bad.speaker.join('；'));
   add('hook-cliff', '每集开场钩子与结尾悬念都落在纸面', eps.length > 0 && bad.hook.length === 0, bad.hook.join('；'));
+  add('hook-open', `钩子的具象在全集前 ${params.hookWindow} 拍内兑现（hookBeat 认领）`, eps.length > 0 && bad.hookOpen.length === 0, bad.hookOpen.join('；'));
   add('has-action', '每场至少一个动作节拍——纯对白的场是广播剧', eps.length > 0 && bad.noAction.length === 0, bad.noAction.join('；'));
   add('action-prose', '动作描述叙述体，台词只进 dialogue 字段', bad.prose.length === 0, bad.prose.join('；'));
   add('beats-claimed', '大纲爽点逐集认领', bad.beats.length === 0, outline ? bad.beats.join('；') : SKIP_OUTLINE);
@@ -342,6 +364,8 @@ const T = {
   sceneTableNote: '自动汇总 · 模型不写',
   castLinesNote: '按角色聚合 · 列表最多显示 6 行可滚动 · 直接对接 TTS 批量生成',
   hookLabel: '开场钩子',
+  hookAt: (sc, b) => `第 ${sc} 场第 ${b} 拍兑现`,
+  voiceBtn: '音色提示词',
   cliffLabel: '结尾悬念',
   beatsLabel: '认领爽点',
   estLabel: (est, target) => `预估 ${est} 秒 / 目标 ${target} 秒`,
@@ -378,10 +402,13 @@ function namer(ctx = {}) {
   const charName = new Map((ctx.outline?.characters ?? []).map((c) => [c.id, c.name]));
   const sceneName = new Map((ctx.art?.scenes ?? []).map((s) => [s.id, s.name]));
   const propName = new Map((ctx.art?.props ?? []).map((p) => [p.id, p.name]));
+  const voiceByName = new Map((ctx.cast?.characters ?? []).map((c) => [c.name, c?.voice?.prompt ?? '']));
   return {
     char: (id) => (id === 'VO' ? T.voLabel : charName.get(id) ?? id),
     scene: (id) => sceneName.get(id) ?? id,
     prop: (id) => propName.get(id) ?? id,
+    // 台词本对接 TTS：给了 --cast 才有音色提示词（按 outline 名字对上 cast）
+    voice: (id) => voiceByName.get(charName.get(id) ?? '') ?? '',
   };
 }
 
@@ -397,7 +424,7 @@ export function renderMarkdown(doc, ctx = {}) {
   for (const [i, ep] of eps.entries()) {
     const st = stats.episodes[i];
     out.push(`## 第 ${ep.ep} 集`, '');
-    out.push(`> ${t.estLabel(st.est, ep.targetSeconds)} · ${t.hookLabel}：${ep.hook} · ${t.cliffLabel}：${ep.cliff}`);
+    out.push(`> ${t.estLabel(st.est, ep.targetSeconds)} · ${t.hookLabel}：${ep.hook}${Array.isArray(ep.hookBeat) ? `（${t.hookAt(ep.hookBeat[0], ep.hookBeat[1])}）` : ''} · ${t.cliffLabel}：${ep.cliff}`);
     if (ep.beatsClaimed.length) out.push(`> ${t.beatsLabel}：${ep.beatsClaimed.join('、')}`);
     out.push('');
     ep.scenes.forEach((sc, idx) => {
@@ -477,11 +504,13 @@ export function renderHtml(doc, ctx = {}) {
       const scenesHtml = ep.scenes
         .map((sc, idx) => {
           const flow = sc.flow
-            .map((b) =>
-              typeof b.action === 'string'
-                ? `<p class="act-line">${esc(b.action)}</p>`
-                : `<div class="dlg-line"><span class="who">${esc(n.char(b.speaker))}${b.delivery ? `<i>${esc(b.delivery)}</i>` : ''}</span><span class="said">${esc(b.line)}</span><button class="copy mini" data-copy="${esc(b.line)}">${esc(t.copy)}</button></div>`,
-            )
+            .map((b, bi) => {
+              const hooked = Array.isArray(ep.hookBeat) && ep.hookBeat[0] === idx + 1 && ep.hookBeat[1] === bi + 1;
+              const hk = hooked ? ' hooked' : '';
+              return typeof b.action === 'string'
+                ? `<p class="act-line${hk}"${hooked ? ` title="${esc(t.hookLabel)}"` : ''}>${esc(b.action)}</p>`
+                : `<div class="dlg-line${hk}"><span class="who">${esc(n.char(b.speaker))}${b.delivery ? `<i>${esc(b.delivery)}</i>` : ''}</span><span class="said">${esc(b.line)}</span><button class="copy mini" data-copy="${esc(b.line)}">${esc(t.copy)}</button></div>`;
+            })
             .join('\n');
           return `<section class="scene-blk">
   <header class="scene-h">
@@ -501,7 +530,7 @@ export function renderHtml(doc, ctx = {}) {
     <span class="ep-est">${esc(t.estLabel(st.est, ep.targetSeconds))}</span>
     ${ep.beatsClaimed.map((b) => `<i class="bt">${esc(b)}</i>`).join('')}
   </header>
-  <div class="hk"><b>${esc(t.hookLabel)}</b><span>${esc(ep.hook)}</span></div>
+  <div class="hk"><b>${esc(t.hookLabel)}</b><span>${esc(ep.hook)}${Array.isArray(ep.hookBeat) ? ` <i class="hookat">${esc(t.hookAt(ep.hookBeat[0], ep.hookBeat[1]))}</i>` : ''}</span></div>
   <div class="scenes clip">
   ${scenesHtml}
   </div>
@@ -529,6 +558,7 @@ export function renderHtml(doc, ctx = {}) {
     <b>${esc(n.char(c.id))}</b>
     <span class="cast-meta">${c.count} 句 · ${c.chars} 字 · 约 ${r1(c.chars / stats.params.charsPerSecond)} 秒</span>
     <button class="copy" data-copy="${esc(allText)}">${esc(t.copyAllLines)}</button>
+    ${n.voice(c.id) ? `<button class="copy" data-copy="${esc(n.voice(c.id))}">${esc(t.voiceBtn)}</button>` : ''}
   </header>
   <ol class="cast-lines">${c.lines.map((l) => `<li><i>${esc(t.lineRef(l.ep, l.sceneIndex))}</i><span>${esc(l.line)}</span>${l.delivery ? `<em>${esc(l.delivery)}</em>` : ''}</li>`).join('')}</ol>
 </section>`;
@@ -643,6 +673,8 @@ section.top-sec{margin-top:34px}
 .dlg-line{display:grid;grid-template-columns:150px minmax(0,1fr) auto;gap:12px;align-items:baseline;
   padding:5px 0 5px 10px;border-left:2px solid var(--rule-2)}
 .dlg-line:hover{border-left-color:var(--seal)}
+.act-line.hooked,.dlg-line.hooked{border-left:2px solid var(--seal);padding-left:10px;background:var(--seal-soft)}
+.hookat{font-style:normal;font-size:11px;padding:1px 8px;border:1px solid var(--seal);border-radius:99px;color:var(--seal);margin-left:8px;white-space:nowrap}
 .who{font:500 13px/1.6 var(--serif)}
 .who i{display:block;font:400 11px var(--sans);color:var(--ink-3);font-style:normal}
 .said{font:400 14.5px/1.8 var(--serif)}
@@ -828,6 +860,7 @@ const USAGE = `novel-script.mjs — novel-script skill 的确定性工具（剧�
   checkup <script.json> [--outline] [--art] 只打印质量门 ✓/✗，有未过项 exit 1
   render <script.json> [--html|--md]        渲染报告到 stdout（默认 --md）
          [--outline o.json] [--art a.json]  给了上游就把 ID 显示成名字
+         [--cast cast.json]                 台词本带每个角色的音色提示词（对接 TTS）
   slug <name>                               剧名转安全文件名`;
 
 function readJson(path) {
@@ -840,12 +873,11 @@ function flag(rest, name, fallback = null) {
 }
 
 function loadCtx(rest) {
-  const outlinePath = flag(rest, '--outline');
-  const artPath = flag(rest, '--art');
-  return {
-    outline: outlinePath ? readJson(outlinePath) : null,
-    art: artPath ? readJson(artPath) : null,
+  const get = (name) => {
+    const path = flag(rest, name);
+    return path ? readJson(path) : null;
   };
+  return { outline: get('--outline'), art: get('--art'), cast: get('--cast') };
 }
 
 function main(argv) {

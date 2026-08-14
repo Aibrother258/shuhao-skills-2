@@ -19,6 +19,7 @@
 | `ep` | int | 集号，正整数，同一文件内不许重复 |
 | `targetSeconds` | number | 目标秒数。seed 会从大纲的 `minutesPerEpisode × 60` 算好 |
 | `hook` | string | 开场钩子的说明——这一集头几拍靠什么把人摁住。**必填** |
+| `hookBeat` | [int, int] | 钩子具象兑现的位置 `[场序号, 拍序号]`（基于本集 1 起始）。具象必须在全集前 3 拍内，否则冷开场空转。**必填**，质量门 `hook-open` 查 |
 | `cliff` | string | 结尾悬念的说明——最后一拍留什么让人点下一集。**必填** |
 | `beatsClaimed` | string[] | 认领的大纲爽点 `type`（如 `"身份揭破"`）。没有就空数组，**字段本身必须在** |
 | `scenes` | scene[] | 场次，按剧情顺序 |

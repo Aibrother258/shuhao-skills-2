@@ -79,6 +79,18 @@ export function templateProject(opts = {}) {
       script: '',
       storyboard: '',
     },
+    // ── 各层 HTML 报告（流程必备交付物）──
+    // 每层质量门通过后必须出 HTML 报告（人审交付物）。文件名约定见各 skill SKILL.md 的"输出"段：
+    //   outline → outline-report.html，cast → report.html，art → art-report.html，
+    //   script → script-report.html，storyboard → storyboard-report.html。
+    // 相对 project.json 所在目录解析，也可写绝对路径。verify 会检查这些文件是否就位。
+    reports: {
+      'novel-outline': '',
+      'novel-characters': '',
+      'novel-art': '',
+      'novel-script': '',
+      'novel-storyboard': '',
+    },
     skills: {
       'novel-characters': 'pending',
       'novel-outline': 'pending',
@@ -567,6 +579,45 @@ export function staleArtifacts(project, loaded) {
 }
 
 /* ------------------------------------------------------------------ */
+/* P0-4：HTML 报告交付物检查                                              */
+/* ------------------------------------------------------------------ */
+// 每层质量门通过后必须出 HTML 报告（人审交付物）。各 skill 的 render --html 输出文件名：
+//   novel-outline→outline-report.html，novel-characters→report.html，
+//   novel-art→art-report.html，novel-script→script-report.html，
+//   novel-storyboard→storyboard-report.html。
+// 优先用 project.reports[skillId] 显式配置；未配置则按"产物所在目录 + 默认文件名"兜底推断。
+const DEFAULT_REPORT_NAME = {
+  'novel-outline': 'outline-report.html',
+  'novel-characters': 'report.html',
+  'novel-art': 'art-report.html',
+  'novel-script': 'script-report.html',
+  'novel-storyboard': 'storyboard-report.html',
+};
+
+export function checkReports(project, base, loaded, issues) {
+  const reportsCfg = project.reports || {};
+  for (const s of SKILLS) {
+    const { abs, data } = loaded[s.id];
+    if (!abs || !data) continue; // 该层产物还没做，跳过报告检查
+    let rel = reportsCfg[s.id];
+    if (!rel) {
+      // 兜底：产物同目录 + 默认文件名
+      const dir = dirname(abs);
+      rel = join(dir, DEFAULT_REPORT_NAME[s.id]);
+    }
+    const repAbs = isAbsolute(rel) ? rel : join(base, rel);
+    try {
+      readFileSync(repAbs);
+    } catch {
+      issues.push({
+        skill: s.id, level: 'warning',
+        msg: `质量门已过的「${s.label}」缺 HTML 报告（人审交付物）——请跑 ${s.id} 的 render --html 生成 ${DEFAULT_REPORT_NAME[s.id]} 后再 verify`,
+      });
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 汇总                                                                 */
 /* ------------------------------------------------------------------ */
 
@@ -592,6 +643,9 @@ export function verifyProject(projectPath) {
   if (script.data) checkScript(project, script.data, outline.data, art.data, issues);
   if (storyboard.data) checkStoryboard(project, storyboard.data, script.data, art.data, cast.data, outline.data, issues);
   if (storyboard.data) checkContinuity(project, base, storyboard.data, issues);
+  // P0-4 HTML 报告交付物检查：每层质量门通过后必须出 HTML 报告（人审交付物）。
+  // 只有"该层产物已存在"才检查报告；产物都还没做就别报报告缺失（避免噪音）。
+  checkReports(project, base, loaded, issues);
   // P0-2 失效传播：上游 hash 变了但本层没重跑 → 过期
   for (const id of staleArtifacts(project, loaded)) {
     const s = SKILLS.find((x) => x.id === id);

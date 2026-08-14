@@ -1047,6 +1047,120 @@ function renderMarkdown(doc, ctx) {
 }
 
 // ── 渲染：HTML ───────────────────────────────────────────
+// ── 亮色国风样式（与另外 4 个 skill 的 HTML 报告统一）──
+const HTML_STYLE = `:root{
+  --paper:#eceded; --panel:#f5f6f5; --side:#e4e6e3; --ink:#191d21; --ink-2:#5b636a; --ink-3:#8c9298;
+  --rule:#d2d5d0; --rule-2:#c2c6bf; --seal:#8a3324; --seal-2:#c56a4e; --seal-soft:#8a332412; --ok:#3d6b4f;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --sans:-apple-system,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--sans);background:var(--paper);color:var(--ink);padding:24px}
+h1{font:400 26px/1.1 "Songti SC","STSong","Source Han Serif SC",serif;letter-spacing:.04em;margin-bottom:6px}
+.meta{color:var(--ink-2);font-size:13px;margin-bottom:18px}
+.kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
+.kpi{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:11px 16px;min-width:110px}
+.kpi .v{font:400 26px/1.15 "Songti SC","STSong",serif;margin-top:5px}
+.kpi .k{font:500 10px/1 var(--sans);letter-spacing:.18em;color:var(--ink-3);margin-top:2px}
+.banner{border-radius:2px;padding:12px 16px;font-weight:700;margin-bottom:18px;border:1px solid var(--seal)}
+.pass{background:var(--seal-soft);color:var(--ok);border-color:var(--ok)}
+.fail{background:var(--seal-soft);color:var(--seal);border-color:var(--seal)}
+h2{font:400 18px/1.2 "Songti SC","STSong",serif;letter-spacing:.05em;margin:22px 0 8px}
+.sub{color:var(--ink-2);font-size:13px;font-weight:400}
+table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:8px;background:var(--panel);border:1px solid var(--rule)}
+th,td{border:1px solid var(--rule);padding:6px 8px;text-align:left;vertical-align:top}
+th{background:var(--side);color:var(--ink-3);font:500 11px/1 var(--sans);letter-spacing:.1em}
+.prompt{color:var(--ink-2);max-width:300px;font-family:var(--mono);font-size:11.5px}
+.h3desc{color:var(--ink);max-width:360px;font-family:"Songti SC",serif}
+.warn{color:var(--seal);font-size:11.5px}
+.gates{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:14px 18px;margin-bottom:18px}
+.gates h2{margin-top:0}.gates ul{list-style:none;padding:0}.gates li{margin:5px 0;font-size:13px;display:flex;gap:8px}.gates .ok{color:var(--ok)}.gates .bad{color:var(--seal)}.gates .info{color:var(--ink-3)}
+.batches{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.batch{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:6px 10px;font-size:12px}
+.shot-copy{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:8px 12px;margin:8px 0}
+.shot-copy>summary{cursor:pointer;color:var(--seal);font-size:13px;font-weight:600}
+.cb{margin:8px 0}.cbl{color:var(--ink-2);font-size:11.5px;margin-bottom:4px}
+.cb pre{background:var(--paper);border:1px solid var(--rule-2);border-radius:2px;padding:10px;font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:var(--ink);max-height:320px;overflow:auto;font-family:var(--mono)}
+.layers{background:var(--panel);border:1px solid var(--rule);border-radius:2px;padding:12px 16px;margin-bottom:18px;font-size:12.5px}
+.layers b{color:var(--seal)}.layers .note{color:var(--ink-2);margin-top:6px}
+.data{border:1px solid var(--rule);border-radius:2px;margin-bottom:18px;overflow:hidden}
+.data summary{cursor:pointer;background:var(--panel);padding:12px 16px;font-weight:700;font-size:13px;color:var(--seal);border-bottom:1px solid var(--rule)}
+.data .bar{padding:8px 16px;display:flex;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--rule)}
+.data .bar button{background:var(--panel);color:var(--ink);border:1px solid var(--rule-2);border-radius:2px;padding:5px 12px;font-size:12px;cursor:pointer}
+.data .bar button:hover{border-color:var(--seal);color:var(--seal)}
+.data pre{margin:0;padding:14px 16px;background:var(--paper);color:var(--ink);font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto;font-family:var(--mono)}
+@media print{body{background:#fff}.layers,.data .bar{display:none}}`;
+
+// 单集 section（供整份报告复用）
+function epHtmlSection(doc, ep, ctx) {
+  const rows = (ep.shots || []).map(s => {
+    const chars = (s.characters || []).map(c => ctx && ctx.cidToName[c] ? ctx.cidToName[c] : c).join('、');
+    const prompt = (s.prompt || '').slice(0, 120) + ((s.prompt || '').length > 120 ? '…' : '');
+    const h3 = (s.h3 && s.h3.integrated_multimodal_description || '').slice(0, 160) + ((s.h3 && s.h3.integrated_multimodal_description || '').length > 160 ? '…' : '');
+    const warn = (s.warnings || []).map(w => `<span class="warn">⚠ ${esc(w)}</span>`).join(' ');
+    return `<tr><td>${esc(s.shotId)}</td><td>${esc(s.sceneId)}</td><td>${esc(s.lighting)}</td><td>${esc(chars)}</td><td>${esc((s.props||[]).join('、'))}</td><td>${esc(s.shotType)}</td><td>${esc(s.camera)}</td><td>${fmtSec(s.durationSec)}s</td><td class="prompt">${esc(prompt)}</td><td class="h3desc">${esc(h3)}</td><td>${esc(s.batch)}</td><td>${warn}</td></tr>`;
+  }).join('');
+  const copyBlocks = (ep.shots || []).map(s => {
+    const h3 = s.h3CopyBlock ? `<div class="cb"><div class="cbl">视频生成（MiniMax H3 ComfyUI）</div><pre>${esc(s.h3CopyBlock)}</pre></div>` : '';
+    return `<details class="shot-copy"><summary>${esc(s.shotId)} · 可复制提示词块</summary><div class="cb"><div class="cbl">首帧出图（Krea2 ComfyUI）</div><pre>${esc(s.firstFrameCopyBlock || '（未生成）')}</pre></div>${h3}</details>`;
+  }).join('');
+  return `<section class="ep"><h2>第 ${ep.ep} 集 <span class="sub">预估 ${fmtSec(ep.targetSeconds)}s</span></h2><table><thead><tr><th>镜号</th><th>场景</th><th>光照</th><th>角色</th><th>道具</th><th>景别</th><th>机位</th><th>时长</th><th>首帧提示词</th><th>H3 描述</th><th>批次</th><th>预警</th></tr></thead><tbody>${rows}</tbody></table>${copyBlocks}</section>`;
+}
+
+// 单集独立 HTML 文件（--per-ep）：排版借鉴 outline/script 的分集卡结构（.ep + .gate 网格）。
+function renderEpHtml(doc, ctx, ep) {
+  const p = paramsOf(doc);
+  const stats = computeStats(doc);
+  const gr = gateReport(doc, ctx);
+  const epShots = (ep.shots || []);
+  const epSeconds = epShots.reduce((n, s) => n + (s.durationSec || 0), 0);
+  const epBatchIds = [...new Set(epShots.map(s => s.batch).filter(Boolean))].sort();
+  const epBatchCount = epBatchIds.length;
+  const passClass = gr.failed.length ? 'fail' : 'pass';
+  const passText = gr.failed.length ? `未通过 ${gr.failed.length} 道` : '全部通过';
+  const gateRows = gr.gates.map(g => `<li class="${g.ok ? 'ok' : 'bad'}">${g.ok ? '✅' : '❌'} <b>${esc(g.name)}</b> <span class="info">${esc(g.info)}</span></li>`).join('');
+  const batchRows = epBatchIds.map(b => `<div class="batch"><b>${esc(b)}</b></div>`).join('');
+  // 单集报告只内嵌本集数据（而非整份 doc），既瘦身又契合「单集」语义；复制/下载本集 JSON。
+  const jsonPayload = JSON.stringify(ep, null, 2);
+  const epJsonName = `E${String(ep.ep).padStart(2, '0')}.json`;
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 第 ${ep.ep} 集</title><style>${HTML_STYLE}</style></head><body>
+<div class="layers">
+  <b>三层交付物（用途务必分清）</b><br>
+  · <b>JSON</b>（Agent 用）：机器可读的分镜生产单。下方「JSON 源码」即同份数据。<br>
+  · <b>HTML</b>（人审用）：本页——单集 KPI / 质量门 / 批次 / 逐镜表 + 可复制提示词。<br>
+  · <b>Prompt</b>（生产用）：export 命令产出的平铺 txt 包，直接粘进 Krea2 / MiniMax H3 / ComfyUI。
+  <div class="note">角色图不在本流程内生成。把「JSON 源码」里 refImagePaths 指向的路径放入你在别处生成的定稿图，再回填路径即可。</div>
+</div>
+<details class="data"><summary>📦 JSON 源码（Agent 用 · 点击展开）</summary>
+<div class="bar"><button id="copyJson">复制本集 JSON</button><button id="dlJson">下载 ${esc(epJsonName)}</button><span class="info" id="jsonSize"></span></div>
+<pre id="jsonView"></pre></details>
+<script>
+  const SB_DATA = ${jsonPayload};
+  (function(){
+    const v=document.getElementById('jsonView');
+    const txt=JSON.stringify(SB_DATA,null,2);
+    v.textContent=txt;
+    document.getElementById('jsonSize').textContent='('+ (txt.length/1024).toFixed(0) +' KB, 第 ${ep.ep} 集 '+ ${epShots.length} +' 镜)';
+    document.getElementById('copyJson').onclick=async()=>{try{await navigator.clipboard.writeText(txt);}catch(e){const t=document.createElement('textarea');t.value=txt;document.body.appendChild(t);t.select();document.execCommand('copy');t.remove();}const b=document.getElementById('copyJson');b.textContent='已复制';setTimeout(()=>b.textContent='复制本集 JSON',1200);};
+    document.getElementById('dlJson').onclick=()=>{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:'application/json'}));a.download='${epJsonName}';a.click();URL.revokeObjectURL(a.href);};
+  })();
+</script>
+<h1>${esc(doc.source || '未命名')} · 第 ${ep.ep} 集</h1>
+<div class="meta">novel-storyboard ${SCRIPT_VERSION} ｜ 风格 ${esc(p.style)} ｜ 提示格式 ${esc(p.promptFormat)} ｜ 语速 ${p.charsPerSecond} 字/秒 ｜ 动作 ${p.actionSeconds}s ｜ 容差 ±${Math.round(p.tolerance * 100)}%</div>
+<div class="kpis">
+<div class="kpi"><div class="v">${epShots.length}</div><div class="k">本集镜头</div></div>
+<div class="kpi"><div class="v">${fmtSec(epSeconds)}s</div><div class="k">本集预估时长</div></div>
+<div class="kpi"><div class="v">${fmtSec(ep.targetSeconds)}s</div><div class="k">目标时长</div></div>
+<div class="kpi"><div class="v">${epBatchCount}</div><div class="k">生成批次</div></div>
+<div class="kpi"><div class="v">${stats.episodes}</div><div class="k">总集数</div></div>
+</div>
+<div class="banner ${passClass}">质量门（全剧）：通过 ${gr.passed}/${gr.total}（跳过 ${gr.skipped}）｜ ${passText}</div>
+<div class="gates"><h2>质量门明细</h2><ul>${gateRows}</ul></div>
+<div class="gates"><h2>本集生成批次</h2><div class="batches">${batchRows || '<span class="info">无</span>'}</div></div>
+${epHtmlSection(doc, ep, ctx)}
+</body></html>`;
+}
+
 function renderHtml(doc, ctx) {
   const p = paramsOf(doc);
   const stats = computeStats(doc);
@@ -1054,57 +1168,14 @@ function renderHtml(doc, ctx) {
   const gateRows = gr.gates.map(g => `<li class="${g.ok ? 'ok' : 'bad'}">${g.ok ? '✅' : '❌'} <b>${esc(g.name)}</b> <span class="info">${esc(g.info)}</span></li>`).join('');
   const batchRows = stats.batches.map(b => `<div class="batch"><b>${esc(b.id)}</b> ×${b.count}：${esc(b.shotIds.join(', '))}</div>`).join('');
 
-  const epSections = (doc.episodes || []).map(ep => {
-    const rows = (ep.shots || []).map(s => {
-      const chars = (s.characters || []).map(c => ctx && ctx.cidToName[c] ? ctx.cidToName[c] : c).join('、');
-      const prompt = (s.prompt || '').slice(0, 120) + ((s.prompt || '').length > 120 ? '…' : '');
-      const h3 = (s.h3 && s.h3.integrated_multimodal_description || '').slice(0, 160) + ((s.h3 && s.h3.integrated_multimodal_description || '').length > 160 ? '…' : '');
-      const warn = (s.warnings || []).map(w => `<span class="warn">⚠ ${esc(w)}</span>`).join(' ');
-      return `<tr><td>${esc(s.shotId)}</td><td>${esc(s.sceneId)}</td><td>${esc(s.lighting)}</td><td>${esc(chars)}</td><td>${esc((s.props||[]).join('、'))}</td><td>${esc(s.shotType)}</td><td>${esc(s.camera)}</td><td>${fmtSec(s.durationSec)}s</td><td class="prompt">${esc(prompt)}</td><td class="h3desc">${esc(h3)}</td><td>${esc(s.batch)}</td><td>${warn}</td></tr>`;
-    }).join('');
-    const copyBlocks = (ep.shots || []).map(s => {
-      const h3 = s.h3CopyBlock ? `<div class="cb"><div class="cbl">视频生成（MiniMax H3 ComfyUI）</div><pre>${esc(s.h3CopyBlock)}</pre></div>` : '';
-      return `<details class="shot-copy"><summary>${esc(s.shotId)} · 可复制提示词块</summary><div class="cb"><div class="cbl">首帧出图（Krea2 ComfyUI）</div><pre>${esc(s.firstFrameCopyBlock || '（未生成）')}</pre></div>${h3}</details>`;
-    }).join('');
-    return `<section class="ep"><h2>第 ${ep.ep} 集 <span class="sub">预估 ${fmtSec(ep.targetSeconds)}s</span></h2><table><thead><tr><th>镜号</th><th>场景</th><th>光照</th><th>角色</th><th>道具</th><th>景别</th><th>机位</th><th>时长</th><th>首帧提示词</th><th>H3 描述</th><th>批次</th><th>预警</th></tr></thead><tbody>${rows}</tbody></table>${copyBlocks}</section>`;
-  }).join('');
+  const epSections = (doc.episodes || []).map(ep => epHtmlSection(doc, ep, ctx)).join('');
 
   const passClass = gr.failed.length ? 'fail' : 'pass';
   const passText = gr.failed.length ? `未通过 ${gr.failed.length} 道` : '全部通过';
 
   const jsonPayload = JSON.stringify(doc, null, 2);
 
-  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 分镜</title><style>
-*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#0f1115;color:#e6e6e6;padding:24px}
-h1{font-size:22px;margin-bottom:6px}.meta{color:#8b93a1;font-size:13px;margin-bottom:18px}
-.kpis{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:20px}
-.kpi{background:#1a1d24;border:1px solid #2a2f3a;border-radius:10px;padding:12px 16px;min-width:110px}
-.kpi .v{font-size:22px;font-weight:700;color:#7aa2ff}.kpi .k{font-size:12px;color:#8b93a1;margin-top:2px}
-.banner{border-radius:10px;padding:12px 16px;font-weight:700;margin-bottom:18px}
-.pass{background:#16301f;color:#5ee08a;border:1px solid #2c5a3c}
-.fail{background:#311717;color:#ff7a7a;border:1px solid #5a2c2c}
-h2{font-size:17px;margin:22px 0 8px}.sub{color:#8b93a1;font-size:13px;font-weight:400}
-table{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:8px}
-th,td{border:1px solid #2a2f3a;padding:6px 8px;text-align:left;vertical-align:top}
-th{background:#1a1d24;color:#aab2c0}
-.prompt{color:#9fb4d8;max-width:300px}
-.h3desc{color:#b8d8c0;max-width:360px}
-.warn{color:#ffcf6b;font-size:11.5px}
-.gates{background:#1a1d24;border:1px solid #2a2f3a;border-radius:10px;padding:14px 18px;margin-bottom:18px}
-.gates h2{margin-top:0}.gates ul{list-style:none}.gates li{margin:5px 0;font-size:13px}.gates .ok{color:#5ee08a}.gates .bad{color:#ff7a7a}.gates .info{color:#8b93a1}
-.batches{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px}.batch{background:#1a1d24;border:1px solid #2a2f3a;border-radius:8px;padding:6px 10px;font-size:12px}
-.shot-copy{background:#1a1d24;border:1px solid #2a2f3a;border-radius:8px;padding:8px 12px;margin:8px 0}
-.shot-copy>summary{cursor:pointer;color:#7aa2ff;font-size:13px;font-weight:600}
-.cb{margin:8px 0}.cbl{color:#8b93a1;font-size:11.5px;margin-bottom:4px}
-.cb pre{background:#0f1115;border:1px solid #2a2f3a;border-radius:6px;padding:10px;font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;color:#cdd6e6;max-height:320px;overflow:auto}
-.layers{background:#14181f;border:1px solid #2a2f3a;border-radius:10px;padding:12px 16px;margin-bottom:18px;font-size:12.5px}
-.layers b{color:#7aa2ff}.layers .note{color:#8b93a1;margin-top:6px}
-.data{border:1px solid #2a2f3a;border-radius:10px;margin-bottom:18px;overflow:hidden}
-.data summary{cursor:pointer;background:#1a1d24;padding:12px 16px;font-weight:700;font-size:13px;color:#7aa2ff}
-.data .bar{padding:8px 16px;display:flex;gap:10px;flex-wrap:wrap;border-bottom:1px solid #2a2f3a}
-.data .bar button{background:#2a2f3a;color:#e6e6e6;border:0;border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer}
-.data pre{margin:0;padding:14px 16px;background:#0f1115;color:#cdd6e6;font-size:11px;line-height:1.45;white-space:pre-wrap;word-break:break-word;max-height:420px;overflow:auto}
-</style></head><body>
+  return `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 分镜</title><style>${HTML_STYLE}</style></head><body>
 <div class="layers">
   <b>三层交付物（用途务必分清）</b><br>
   · <b>JSON</b>（Agent 用）：机器可读的分镜生产单，结构化、可程序化驱动下游。下方「JSON 源码」即同份数据。<br>
@@ -1244,11 +1315,36 @@ function cmdCheckup(args) {
 function cmdRender(args) {
   const { pos, opts } = parseArgs(args);
   const p = pos[0];
-  if (!p) { console.error('用法: render <storyboard.json> [--md|--html] [--script --outline --art --cast] [--all] [--out 路径]'); process.exit(2); }
+  if (!p) { console.error('用法: render <storyboard.json> [--md|--html] [--per-ep] [--script --outline --art --cast] [--all] [--out 路径或目录]'); process.exit(2); }
   const doc = readDoc(p);
   const ctx = resolveCtx(opts);
   const md = opts.html ? null : true;
   const html = opts.html ? true : false;
+  // --per-ep：每集一个独立 HTML 文件（借鉴 outline/script 的分集卡排版），输出到 --out 目录。
+  if (opts['per-ep']) {
+    const outDir = opts.out ? resolve(opts.out) : resolve(process.cwd(), 'by-episode');
+    mkdirSync(outDir, { recursive: true });
+    const eps = doc.episodes || [];
+    let n = 0;
+    const idxLinks = [];
+    for (const ep of eps) {
+      const fn = `E${String(ep.ep).padStart(2, '0')}.html`;
+      writeFileSync(join(outDir, fn), renderEpHtml(doc, ctx, ep));
+      const sec = (ep.shots || []).reduce((s, sh) => s + (sh.durationSec || 0), 0);
+      idxLinks.push(`<li><a href="./${fn}">第 ${ep.ep} 集</a> · ${(ep.shots || []).length} 镜 · 预估 ${fmtSec(sec)}s</li>`);
+      n += 1;
+    }
+    // 目录导航页（index.html）：亮色国风，列出各集入口
+    const idx = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(doc.source || '分镜表')} · 分镜（按集）</title><style>${HTML_STYLE}</style></head><body>
+<h1>${esc(doc.source || '未命名')} · 分镜表（按集）</h1>
+<div class="meta">novel-storyboard ${SCRIPT_VERSION} ｜ 共 ${eps.length} 集 ｜ 点击任一集进入单集报告</div>
+<div class="gates"><h2>各集入口</h2><ul>${idxLinks.join('')}</ul></div>
+</body></html>`;
+    writeFileSync(join(outDir, 'index.html'), idx);
+    console.error(`✓ 已按集生成 ${n} 份 HTML 报告 → ${outDir}`);
+    console.error(`  · index.html 为目录导航页`);
+    return;
+  }
   if (html) {
     const out = renderHtml(doc, ctx);
     if (opts.out) writeFileSync(resolve(opts.out), out);

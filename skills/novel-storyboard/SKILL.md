@@ -130,6 +130,15 @@ node scripts/novel-storyboard.mjs validate <书名>-storyboard.json \
 > 交互约定见 `novel-project/references/interaction-checkpoints.md` 的 **C6 分镜三层交付** +
 > **三层交付物**：这一步产出的 JSON / HTML / prompts 层级必须分清（JSON=Agent、HTML=人审、
 > Prompt=生产），且**不替用户生图**——只给提示词与回填路径。
+
+> 📐 **报告样式已固化**：`storyboard-report.html` 的视觉风格（亮色国风、配色令牌、版式结构）
+> 由 `references/report-style.md` 统一定版，脚本内联 `<style>` 须与该规范同步。**改样式先改规范文件**，
+> 不要临时在脚本里改配色——保证跨项目、跨次生成风格一致。其他 skill 的 HTML 报告也建议统一到本规范。
+
+> 🗂 **按集拆分（避免单文件过长）**：`render --per-ep --out <目录>` 会把每个 episode 渲染成一份独立
+> HTML（`E01.html / E02.html / …`），并在目录下生成 `index.html` 导航页；每集报告的排版沿用本规范、
+> 借鉴 outline/script 的分集卡结构（单集 KPI + 质量门 + 批次 + 逐镜表）。超长分镜表推荐用此模式，
+> 单集文件更小、更易审。整份 `render --html` 仍保留可用。
 ```bash
 # 一条命令同时产出 JSON（Agent 用）+ HTML（人审用）+ prompts/（生产用）
 node scripts/novel-storyboard.mjs render <书名>-storyboard.json --html --all \

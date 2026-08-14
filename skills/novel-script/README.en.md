@@ -15,7 +15,7 @@ Outputs `script.json`, a Markdown script, and a self-contained `script-report.ht
 
 ![script-report.html](assets/report.webp)
 
-## Nine quality gates, all code
+## Ten quality gates, all code
 
 Same stance as the other three skills in this repo: **a checklist the model grades itself on is worthless.**
 
@@ -25,6 +25,7 @@ Same stance as the other three skills in this repo: **a checklist the model grad
 | Line length | ≤ 35 chars — a line you can't say in one breath can't be generated either |
 | Speaker legality | speaker must be in the scene's cast, or explicitly `VO` |
 | Hook & cliff on paper | `hook` / `cliff` required per episode |
+| **Hook lands in the first 3 beats** | `hookBeat` pins the hook's concrete moment to `[scene, beat]` — it must land within the first 3 beats of the episode, not just be described |
 | **At least one action beat per scene** | a dialogue-only scene is radio drama — nothing for the picture to do |
 | Narrative action | no quoted dialogue inside action beats — lines only live in dialogue entries |
 | Beats claimed | every beat the outline pins to this episode must be claimed (checked with `--outline`; skipping is **announced**, never silent) |
@@ -80,7 +81,7 @@ node scripts/novel-script.mjs render script.json --html --outline outline.json -
 node scripts/selftest.mjs
 ```
 
-125 assertions — timing engine, stats, gate-defeating cases, seed, rendering, export. No model calls, runs in about a second.
+129 assertions — timing engine, stats, gate-defeating cases (incl. hook-open), seed, rendering, export. No model calls, runs in about a second.
 
 The bundled example (`examples/渡口-script.json`) is a **complete 6-episode script** — 9 scenes, 123 lines, every episode inside the ±15% band, all gates passing against the outline and art fixtures.
 

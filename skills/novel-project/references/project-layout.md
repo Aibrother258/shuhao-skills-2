@@ -16,21 +16,32 @@
 
 ```
 <project>/pipeline/
-├── 01_outline/      outline.json, outline.md            · novel-outline
-├── 02_cast/         cast.json, cast.md, images/         · novel-characters
+├── 01_outline/      outline.json, outline.md,
+│                    outline-report.html                 · novel-outline（HTML 交付物）
+├── 02_cast/         cast.json, cast.md, report.html,
+│                    images/                             · novel-characters（HTML 交付物）
 │                    images/<角色>-model-sheet.png
 │                    images/candidates/（候选，供挑选）
-├── 03_art/          art.json, art.md, images/           · novel-art
+├── 03_art/          art.json, art.md, art-report.html,
+│                    images/                             · novel-art（HTML 交付物）
 │                    images/（场景图 + 道具图，待生成回填）
-├── 04_script/       script.json, script.md              · novel-script
+├── 04_script/       script.json, script.md,
+│                    script-report.html                  · novel-script（HTML 交付物）
 ├── 05_storyboard/   storyboard.json, storyboard.md,
-│                    storyboard-report.html              · novel-storyboard
+│                    storyboard-report.html,             · novel-storyboard（整份 HTML 交付物）
+│                    by-episode/                          · 按集拆分（推荐，每集一个 HTML）
+│                      ├ index.html                        · 目录导航页
+│                      ├ E01.html … E<NN>.html             · 每集独立报告（亮色国风，与另4个统一）
 ├── 06_prompts/      shots/ characters/ scenes/ props/   · novel-storyboard --all
 ├── 07_generated/    frames/ video/ audio/（外部生成产物占位）
 ├── 08_workflows/    外部工作流（不纳入 skills）
-├── tools/           build-panel.mjs, backfill-cast.mjs（辅助脚本）
+├── tools/           build-panel.mjs, backfill-cast.mjs（辅助脚本，规划中，尚未实现）
+├── project.json     五层总账（paths + reports + skills 状态 + 生产状态）
 └── README.md        结构说明 + skills 映射
 ```
+
+> HTML 报告是每层质量门通过后的**人审交付物**，由对应 skill 的 `render --html` 产出，文件名
+> 固定见各 skill SKILL.md；`verify` 会检查这 5 个 HTML 是否齐备（见 schema.md P0-4）。
 
 ## 引用约定（必须保持）
 

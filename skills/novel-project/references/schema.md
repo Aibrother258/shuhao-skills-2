@@ -21,6 +21,13 @@
     "script": "script/渡口-script.json",
     "storyboard": "storyboard/渡口-storyboard.json"
   },
+  "reports": {
+    "novel-outline": "outline/outline-report.html",
+    "novel-characters": "characters/report.html",
+    "novel-art": "art/art-report.html",
+    "novel-script": "script/script-report.html",
+    "novel-storyboard": "storyboard/storyboard-report.html"
+  },
   "skills": {
     "novel-characters": "pending",  // pending / passed / failed
     "novel-outline": "pending",
@@ -106,6 +113,33 @@
 | 镜头道具 ∈ art.props；剧本该场没登记 | 错误 / 警告 |
 | 单集镜头总时长超出剧本目标 ±15% | 警告 |
 | 角色参考图是 `【角色图:…】` 占位符 | 警告（按角色聚合） |
+
+### P0-4：HTML 报告交付物（流程铁律）
+
+每层质量门通过后**必须**出 HTML 报告（人审交付物），`verify` 会检查：
+
+| 规则 | 级别 |
+| --- | --- |
+| 各层产物已存在时，对应的 HTML 报告文件也必须存在 | 警告——提醒跑该层 `render --html` 补齐 |
+
+各 skill 的 `render --html` 输出文件名（约定，改前先同步本表与各 skill SKILL.md）：
+
+| skill | HTML 报告文件名 | 落点目录 |
+| --- | --- | --- |
+| novel-outline | `outline-report.html` | `01_outline/` |
+| novel-characters | `report.html` | `02_cast/` |
+| novel-art | `art-report.html` | `03_art/` |
+| novel-script | `script-report.html` | `04_script/` |
+| novel-storyboard | `storyboard-report.html` | `05_storyboard/` |
+
+> **样式统一**：全部 HTML 报告（含上表 5 个）视觉风格须遵循 `novel-storyboard/references/report-style.md`
+> 的亮色国风规范（配色令牌 / 版式结构）。`storyboard-report.html` 是该规范的定版来源；其余 4 个
+> skill 的 render 脚本内联 `<style>` 应同步复用同一套变量，保证整套交付物视觉一致。改样式先改
+> `report-style.md`，再同步各脚本。
+
+`project.reports[skillId]` 显式登记路径（相对 `project.json` 所在目录）；未登记则按上表
+「产物同目录 + 默认文件名」兜底推断。`reports` 与 `paths` 一样是三层交付物（JSON/HTML/prompts）
+里 HTML 这一层的登记入口——漏了会拖到 `verify` 才被发现。
 
 ## 边界
 

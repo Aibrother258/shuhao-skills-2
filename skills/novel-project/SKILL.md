@@ -113,6 +113,22 @@ lighting/weather/time）。`verify` 比对相邻镜：**同集内**角色服装�
 旧分镜无 `continuity` 块时自动跳过，向后兼容；`continuity` 块全是 seed 骨架（关键字段
 未填）时也会提醒——连续性检查只有在状态被填实后才真正生效。
 
+#### P0-4 HTML 报告交付物（流程铁律）
+
+每层质量门通过后**必须**出 HTML 报告（人审交付物），这是流程的收尾标记，不是可选项。
+`verify` 会检查每个"产物已存在"的层是否也产出了对应 HTML 报告，缺则报警告并提示跑
+该层 `render --html`。各层报告文件名见 `references/schema.md` 的 P0-4 表：
+
+- `novel-outline` → `outline-report.html`
+- `novel-characters` → `report.html`
+- `novel-art` → `art-report.html`
+- `novel-script` → `script-report.html`
+- `novel-storyboard` → `storyboard-report.html`
+
+报告路径在 `project.json` 的 `reports` 字段登记（相对 `project.json` 所在目录），未登记时
+按"产物同目录 + 默认文件名"兜底。`verify` 看到报告缺失就提醒补——**出片前这 5 个 HTML
+应齐备**，方便人工逐层审。
+
 ### Step 3 — 下一步该干什么（build）
 
 ```bash

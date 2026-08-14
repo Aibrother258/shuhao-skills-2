@@ -88,7 +88,7 @@ ok(voEntry.lines[0].sceneId === 'S01', '台词条目带场景');
 
 ok(gateReport(FIXTURE, CTX).every((g) => g.ok), '样例带上游全部门通过');
 ok(gateReport(FIXTURE).every((g) => g.ok), '不带上游也全部通过（对账门跳过）');
-eq(gateReport(FIXTURE).length, 9, '九道门');
+eq(gateReport(FIXTURE).length, 10, '十道门（含 hook-open）');
 
 /* ---------------- 质量门：逐门击穿 ---------------- */
 
@@ -143,6 +143,29 @@ eq(gateReport(FIXTURE).length, 9, '九道门');
   const doc = clone(FIXTURE);
   delete doc.episodes[0].cliff;
   ok(!gate(doc, 'hook-cliff').ok, '缺结尾悬念被拦');
+}
+// hook-open
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].hookBeat = null;
+  ok(!gate(doc, 'hook-open').ok, '缺 hookBeat 被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  doc.episodes[0].hookBeat = [99, 1];
+  ok(!gate(doc, 'hook-open').ok, 'hookBeat 指向不存在的场被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  // 第 1 场 13 拍，把钩子放到第 1 场第 4 拍（绝对位置 4 > 3）应被拦
+  doc.episodes[0].hookBeat = [1, 4];
+  ok(!gate(doc, 'hook-open').ok, '钩子超出前 3 拍被拦');
+}
+{
+  const doc = clone(FIXTURE);
+  // 第 2 场第 1 拍 = 绝对位置 14 > 3，也应被拦
+  doc.episodes[0].hookBeat = [2, 1];
+  ok(!gate(doc, 'hook-open').ok, '钩子落在开场后太远被拦');
 }
 // has-action
 {
@@ -299,7 +322,7 @@ ok(html.includes('分集剧本'), '02 分集剧本');
 ok(html.includes('场次总表'), '03 场次总表');
 ok(html.includes('台词本'), '04 台词本');
 ok(html.includes('质量门'), '05 质量门');
-ok(html.includes('✓ 质量门 9 / 9'), '页眉徽章全绿');
+ok(html.includes('✓ 质量门 10 / 10'), '页眉徽章全绿');
 ok(html.includes('class="band"'), '时长条带目标区间');
 ok(html.includes('导出 JSON'), '导出按钮在');
 ok(html.includes('id="script-data"'), '数据内嵌');

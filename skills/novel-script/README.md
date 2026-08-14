@@ -15,7 +15,7 @@
 
 ![script-report.html](assets/report.webp)
 
-## 质量门：9 道，全是代码
+## 质量门：10 道，全是代码
 
 与仓库里另外三个 skill 同一主张：**checklist 交给模型自觉是靠不住的**。
 
@@ -25,6 +25,7 @@
 | 单句台词长度 | ≤ 35 字——一口气说不完的台词也生成不了 |
 | 说话人合法 | speaker 必须在本场人物里，或明确标 `VO` |
 | 钩子悬念落纸 | 每集 `hook` / `cliff` 必填 |
+| **钩子前 3 拍兑现** | `hookBeat` 认领钩子具象落在 `[场, 拍]`，必须在全集前 3 拍内——钩子不是标签，冷开场不许空转 |
 | **每场至少一个动作节拍** | 纯对白的场是广播剧，AI 生成时没有画面可写 |
 | 动作叙述体 | 动作里不许出现引号台词——台词只能进 dialogue 字段 |
 | 爽点认领 | 大纲说这集有的爆点，剧本必须认领（给 `--outline` 才查，不给**明说跳过**） |
@@ -85,7 +86,7 @@ node scripts/novel-script.mjs slug "渡口"                         # 安全文�
 SKILL.md                 给 agent 读的工作流
 scripts/
   novel-script.mjs       seed / validate / checkup / render / slug
-  selftest.mjs           125 项断言，不调模型
+  selftest.mjs           129 项断言，不调模型
 references/
   schema.md              script.json 结构 + 时长折算规则
   script-pass.md         写戏：硬规则、手感规则、常见病
@@ -102,6 +103,6 @@ assets/
 node scripts/selftest.mjs
 ```
 
-125 项断言，覆盖时长引擎 / 统计 / 质量门逐项击穿 / seed / 渲染 / 导出。不调模型、不花额度、1 秒跑完。改完脚本先跑这个。
+129 项断言，覆盖时长引擎 / 统计 / 质量门逐项击穿（含 hook-open）/ seed / 渲染 / 导出。不调模型、不花额度、1 秒跑完。改完脚本先跑这个。
 
 **已在 macOS + Node 18/20/22（CI 矩阵）上验证。** 代码没有平台相关调用，Linux 同样可运行。

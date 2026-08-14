@@ -1,0 +1,10 @@
+# 自动生成的分镜产物（可由 seed/render 命令从上游四件套重现，勿入版本库）
+skills/novel-storyboard/examples/*-storyboard.json
+skills/novel-storyboard/examples/*-storyboard-report.html
+skills/novel-storyboard/examples/*-storyboard.md
+skills/novel-storyboard/demo/*-storyboard.json
+skills/novel-storyboard/demo/*-storyboard-report.html
+skills/novel-storyboard/demo/*-storyboard.md
+
+# 临时/空文件
+1.md

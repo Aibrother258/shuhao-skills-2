@@ -1,5 +1,33 @@
 # Changelog
 
+## 仓库 — 2026-08-14g：上游同步（eternityspring 新功能并入，本地成果不回退)
+
+用户要求把上游 `eternityspring/shuohao-skills` 的更新同步进来。经核对，上游相对本地主要是回退
+（`novel-project` 编排层引用、`photorealistic` 预设、`portrait` 单视角参考图等被删），唯一真正的
+新增功能在 `novel-script`：
+
+- **`hookBeat` + 第 10 道门 `hook-open`**：钩子具象须在全集前 3 拍（`hookWindow=3`）内兑现，报告标红高亮
+- **台词本对接 TTS 音色**：CLI 新增 `--cast cast.json`，按角色名匹配 `voice.prompt` 带"音色提示词"按钮
+
+按"只取上游新功能、保留本地全部成果"的策略并入：`novel-project` 编排层 / 5 层 HTML 固化 /
+`photorealistic` / `portrait` 等所有本地增强原样保留。样例补 `hookBeat:[1,1]`，自测 125→129，
+novel-project 29 项全绿。已提交 push（commit `c194c30`，16 files +1425/-311）。
+
+## 仓库 — 2026-08-14f：批量功能变更复查
+
+工作区新到一批跨 skill 功能变更，回溯核对后确认功能全部成立，并修掉文档与实现的脱节：
+
+- **功能确认**：novel-script 新增第 10 道门 `hook-open`（hookBeat 前 3 拍兑现，自测 125→129）；
+  台词本带音色提示词按钮（`render --cast`）；storyboard 报告统一亮色国风 + 新增
+  `references/report-style.md` 定版；`render --per-ep` 按集出报告 + index 导航；
+  novel-project 新增 `reports` 登记与 `verify` 的 HTML 报告交付检查（P0-4）
+- **文档修复**：storyboard SKILL.md / novel-project schema.md 的"暗色主题"改"亮色国风"
+  （与代码和 report-style.md 一致）；novel-script 中英 README 与仓库 README 的门数/自测数
+  从 9/125 更新到 10/129（质量门表补 hook-open 行）；project-layout.md 的 tools/ 标注
+  "规划中"（build-panel.mjs / backfill-cast.mjs 尚不存在）
+- **清理**：误入工作区的 `ChatGPT的分析.md` 移到 /tmp（可恢复）
+- **验证**：全仓库 check.mjs --run 全绿，历史残留复检 0 处
+
 ## novel-storyboard — Visual Director 层 + Prompt Finalization（2026-08-14e，Iteration 5）
 
 ChatGPT 第四次 / DeepSeek 复查把仓库定位收敛为 Prompt Pipeline，指出"分镜工程 > Prompt 导演"。按裁剪范围落地（守红线：零依赖、确定性、不新建架构）：
